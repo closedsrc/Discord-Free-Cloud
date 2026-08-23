@@ -1,0 +1,14 @@
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+discord-free-cloud.exe
+data/
+dist/
+checksums.txt
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
+*.swp

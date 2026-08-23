@@ -1,0 +1,932 @@
+package db
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+const (
+	StatusPending   = "PENDING"
+	StatusUploading = "UPLOADING"
+	StatusCompleted = "COMPLETED"
+	StatusFailed    = "FAILED"
+)
+
+const (
+	JobStatusActive    = "ACTIVE"
+	JobStatusPaused    = "PAUSED"
+	JobStatusCompleted = "COMPLETED"
+	JobStatusFailed    = "FAILED"
+)
+
+type Database struct {
+	db *sql.DB
+	mu sync.RWMutex
+}
+
+type SettingRecord struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type ChannelRecord struct {
+	ID          int64  `json:"id"`
+	ChannelID   string `json:"channel_id"`
+	ChannelName string `json:"channel_name"`
+	WebhookURL  string `json:"webhook_url"`
+	GuildID     string `json:"guild_id"`
+	BotToken    string `json:"bot_token"`
+	IsMetadata  bool   `json:"is_metadata"`
+}
+
+type FileRecord struct {
+	ID        string `json:"id"`
+	ParentID  string `json:"parent_id"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	IsDir     bool   `json:"is_dir"`
+	ModTime   int64  `json:"mod_time"`
+	SHA256    string `json:"sha256"`
+	MimeType  string `json:"mime_type"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+type JobRecord struct {
+	ID              string `json:"id"`
+	Type            string `json:"type"`
+	FileID          string `json:"file_id"`
+	FilePath        string `json:"file_path"`
+	TotalBytes      int64  `json:"total_bytes"`
+	TotalChunks     int    `json:"total_chunks"`
+	CompletedChunks int    `json:"completed_chunks"`
+	Status          string `json:"status"`
+	CreatedAt       int64  `json:"created_at"`
+	CompletedAt     *int64 `json:"completed_at,omitempty"`
+}
+
+type ChunkRecord struct {
+	ID            string `json:"id"`
+	JobID         string `json:"job_id"`
+	FileID        string `json:"file_id"`
+	ChunkIndex    int    `json:"chunk_index"`
+	ByteOffset    int64  `json:"byte_offset"`
+	ChunkSize     int    `json:"chunk_size"`
+	SHA256        string `json:"sha256"`
+	GuildID       string `json:"guild_id"`
+	ChannelID     string `json:"channel_id"`
+	MessageID     string `json:"message_id"`
+	AttachmentID  string `json:"attachment_id"`
+	AttachmentURL string `json:"attachment_url"`
+	Status        string `json:"status"`
+	RetryCount    int    `json:"retry_count"`
+	CreatedAt     int64  `json:"created_at"`
+	CompletedAt   *int64 `json:"completed_at,omitempty"`
+}
+
+type BotNodeRecord struct {
+	ID           string `json:"id"`
+	BotToken     string `json:"bot_token"`
+	GuildID      string `json:"guild_id"`
+	BotName      string `json:"bot_name"`
+	GuildName    string `json:"guild_name"`
+	Status       string `json:"status"`
+	PingMs       int64  `json:"ping_ms"`
+	ChannelCount int    `json:"channel_count"`
+	StorageBytes int64  `json:"storage_bytes"`
+	CreatedAt    int64  `json:"created_at"`
+	LastSeen     int64  `json:"last_seen"`
+}
+
+func InitDB(dbPath string) (*Database, error) {
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("could not create folder %w", err)
+	}
+
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=cache_size(-32000)&_pragma=temp_store(MEMORY)&_pragma=mmap_size(268435456)", dbPath)
+	sqlDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("could not open database %w", err)
+	}
+
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+
+	d := &Database{db: sqlDB}
+	if err := d.migrate(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("database setup failed %w", err)
+	}
+
+	return d, nil
+}
+
+func (d *Database) Close() error {
+	return d.db.Close()
+}
+
+func (d *Database) migrate() error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS channels (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		channel_id TEXT UNIQUE NOT NULL,
+		channel_name TEXT NOT NULL,
+		webhook_url TEXT,
+		guild_id TEXT DEFAULT '',
+		bot_token TEXT DEFAULT '',
+		is_metadata INTEGER DEFAULT 0
+	);
+
+	CREATE TABLE IF NOT EXISTS files (
+		id TEXT PRIMARY KEY,
+		parent_id TEXT,
+		name TEXT NOT NULL,
+		path TEXT UNIQUE NOT NULL,
+		size INTEGER NOT NULL,
+		is_dir INTEGER DEFAULT 0,
+		mod_time INTEGER NOT NULL,
+		sha256 TEXT NOT NULL,
+		mime_type TEXT,
+		created_at INTEGER NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS jobs (
+		id TEXT PRIMARY KEY,
+		type TEXT NOT NULL,
+		file_id TEXT NOT NULL,
+		file_path TEXT NOT NULL,
+		total_bytes INTEGER NOT NULL,
+		total_chunks INTEGER NOT NULL,
+		completed_chunks INTEGER DEFAULT 0,
+		status TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		completed_at INTEGER
+	);
+
+	CREATE TABLE IF NOT EXISTS chunks (
+		id TEXT PRIMARY KEY,
+		job_id TEXT NOT NULL,
+		file_id TEXT NOT NULL,
+		chunk_index INTEGER NOT NULL,
+		byte_offset INTEGER NOT NULL,
+		chunk_size INTEGER NOT NULL,
+		sha256 TEXT NOT NULL,
+		guild_id TEXT DEFAULT '',
+		channel_id TEXT,
+		message_id TEXT,
+		attachment_id TEXT,
+		attachment_url TEXT,
+		status TEXT NOT NULL,
+		retry_count INTEGER DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		completed_at INTEGER,
+		FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+	);
+
+	CREATE TABLE IF NOT EXISTS bot_nodes (
+		id TEXT PRIMARY KEY,
+		bot_token TEXT NOT NULL,
+		guild_id TEXT NOT NULL,
+		bot_name TEXT,
+		guild_name TEXT,
+		status TEXT DEFAULT 'Active',
+		ping_ms INTEGER DEFAULT 0,
+		channel_count INTEGER DEFAULT 0,
+		storage_bytes INTEGER DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		last_seen INTEGER DEFAULT 0
+	);
+	`
+	_, err := d.db.Exec(schema)
+	if err != nil {
+		return err
+	}
+
+	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN guild_id TEXT DEFAULT ''")
+	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN bot_token TEXT DEFAULT ''")
+	_, _ = d.db.Exec("ALTER TABLE chunks ADD COLUMN guild_id TEXT DEFAULT ''")
+	_, _ = d.db.Exec("ALTER TABLE bot_nodes ADD COLUMN storage_bytes INTEGER DEFAULT 0")
+	_, _ = d.db.Exec("ALTER TABLE bot_nodes ADD COLUMN last_seen INTEGER DEFAULT 0")
+
+	indexes := `
+	CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent_id);
+	CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
+	CREATE INDEX IF NOT EXISTS idx_chunks_job ON chunks(job_id);
+	CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
+	CREATE INDEX IF NOT EXISTS idx_chunks_status ON chunks(status);
+	CREATE INDEX IF NOT EXISTS idx_chunks_guild ON chunks(guild_id);
+	CREATE INDEX IF NOT EXISTS idx_channels_guild ON channels(guild_id);
+	CREATE INDEX IF NOT EXISTS idx_chunks_sha256 ON chunks(sha256);
+	CREATE INDEX IF NOT EXISTS idx_chunks_file_idx ON chunks(file_id, chunk_index);
+	`
+	_, err = d.db.Exec(indexes)
+	if err != nil {
+		return err
+	}
+
+	_, _ = d.db.Exec("UPDATE settings SET value = '7864320' WHERE key = 'chunk_size_bytes' AND (value = '20971520' OR value = '20000000' OR value = '')")
+	_, _ = d.db.Exec("UPDATE files SET parent_id = '' WHERE parent_id != '' AND parent_id NOT IN (SELECT id FROM files WHERE is_dir = 1)")
+	return nil
+}
+
+func (d *Database) ResetIncompleteState() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.db.Exec(`UPDATE chunks SET status = ? WHERE status = ?`, StatusPending, StatusUploading)
+	if err != nil {
+		return err
+	}
+
+	_, err = d.db.Exec(`
+		UPDATE jobs 
+		SET completed_chunks = (
+			SELECT COUNT(*) FROM chunks WHERE chunks.job_id = jobs.id AND chunks.status = ?
+		)
+		WHERE status = ?
+	`, StatusCompleted, JobStatusActive)
+
+	return err
+}
+
+func (d *Database) SetSetting(key, value string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+func (d *Database) GetSetting(key string) (string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var val string
+	err := d.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&val)
+	if err != nil {
+		return "", err
+	}
+	return val, nil
+}
+
+func (d *Database) GetAllSettings() (map[string]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query(`SELECT key, value FROM settings`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	settings := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		settings[k] = v
+	}
+	return settings, nil
+}
+
+func (d *Database) ClearChannels() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec(`DELETE FROM channels`)
+	return err
+}
+
+func (d *Database) ClearChannelsForGuild(guildID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if guildID == "" {
+		_, err := d.db.Exec(`DELETE FROM channels`)
+		return err
+	}
+	_, err := d.db.Exec(`DELETE FROM channels WHERE guild_id = ?`, guildID)
+	return err
+}
+
+func (d *Database) AddChannel(channelID, channelName, webhookURL string, isMetadata bool) error {
+	return d.AddChannelWithGuild(channelID, channelName, webhookURL, "", "", isMetadata)
+}
+
+func (d *Database) AddChannelWithGuild(channelID, channelName, webhookURL, guildID, botToken string, isMetadata bool) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	isMetaInt := 0
+	if isMetadata {
+		isMetaInt = 1
+	}
+
+	_, err := d.db.Exec(`
+		INSERT INTO channels (channel_id, channel_name, webhook_url, guild_id, bot_token, is_metadata)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(channel_id) DO UPDATE SET
+			channel_name = excluded.channel_name,
+			webhook_url = excluded.webhook_url,
+			guild_id = excluded.guild_id,
+			bot_token = excluded.bot_token,
+			is_metadata = excluded.is_metadata
+	`, channelID, channelName, webhookURL, guildID, botToken, isMetaInt)
+	return err
+}
+
+func (d *Database) GetStorageChannels() ([]ChannelRecord, error) {
+	return d.GetStorageChannelsForGuild("")
+}
+
+func (d *Database) GetStorageChannelsForGuild(guildID string) ([]ChannelRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := `SELECT id, channel_id, channel_name, webhook_url, COALESCE(guild_id, ''), COALESCE(bot_token, ''), is_metadata FROM channels WHERE is_metadata = 0`
+	var args []any
+	if guildID != "" {
+		query += ` AND guild_id = ?`
+		args = append(args, guildID)
+	}
+	query += ` ORDER BY id ASC`
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ChannelRecord
+	for rows.Next() {
+		var c ChannelRecord
+		var isMeta int
+		if err := rows.Scan(&c.ID, &c.ChannelID, &c.ChannelName, &c.WebhookURL, &c.GuildID, &c.BotToken, &isMeta); err != nil {
+			return nil, err
+		}
+		c.IsMetadata = (isMeta == 1)
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+func (d *Database) GetMetadataChannel() (*ChannelRecord, error) {
+	return d.GetMetadataChannelForGuild("")
+}
+
+func (d *Database) GetMetadataChannelForGuild(guildID string) (*ChannelRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := `SELECT id, channel_id, channel_name, webhook_url, COALESCE(guild_id, ''), COALESCE(bot_token, ''), is_metadata FROM channels WHERE is_metadata = 1`
+	var args []any
+	if guildID != "" {
+		query += ` AND guild_id = ?`
+		args = append(args, guildID)
+	}
+	query += ` LIMIT 1`
+
+	var c ChannelRecord
+	var isMeta int
+	err := d.db.QueryRow(query, args...).
+		Scan(&c.ID, &c.ChannelID, &c.ChannelName, &c.WebhookURL, &c.GuildID, &c.BotToken, &isMeta)
+	if err != nil {
+		return nil, err
+	}
+	c.IsMetadata = (isMeta == 1)
+	return &c, nil
+}
+
+func (d *Database) UpsertFile(f *FileRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	isDirInt := 0
+	if f.IsDir {
+		isDirInt = 1
+	}
+
+	_, err := d.db.Exec(`
+		INSERT INTO files (id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET
+			parent_id = excluded.parent_id,
+			name = excluded.name,
+			size = excluded.size,
+			is_dir = excluded.is_dir,
+			mod_time = excluded.mod_time,
+			sha256 = excluded.sha256,
+			mime_type = excluded.mime_type
+	`, f.ID, f.ParentID, f.Name, f.Path, f.Size, isDirInt, f.ModTime, f.SHA256, f.MimeType, f.CreatedAt)
+	return err
+}
+
+func (d *Database) GetFile(id string) (*FileRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var f FileRecord
+	var isDirInt int
+	err := d.db.QueryRow(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE id = ?`, id).
+		Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	f.IsDir = (isDirInt == 1)
+	return &f, nil
+}
+
+func (d *Database) GetFileByPath(path string) (*FileRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var f FileRecord
+	var isDirInt int
+	err := d.db.QueryRow(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE path = ?`, path).
+		Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	f.IsDir = (isDirInt == 1)
+	return &f, nil
+}
+
+func (d *Database) ListFiles(parentID string) ([]FileRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var query string
+	var args []any
+	if parentID == "" {
+		query = `SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE parent_id = '' OR parent_id IS NULL OR parent_id NOT IN (SELECT id FROM files WHERE is_dir = 1) ORDER BY is_dir DESC, name ASC`
+	} else {
+		query = `SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE parent_id = ? ORDER BY is_dir DESC, name ASC`
+		args = append(args, parentID)
+	}
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []FileRecord
+	for rows.Next() {
+		var f FileRecord
+		var isDirInt int
+		if err := rows.Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt); err != nil {
+			return nil, err
+		}
+		f.IsDir = (isDirInt == 1)
+		list = append(list, f)
+	}
+	return list, nil
+}
+
+func (d *Database) GetAllFiles() ([]FileRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files ORDER BY path ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []FileRecord
+	for rows.Next() {
+		var f FileRecord
+		var isDirInt int
+		if err := rows.Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt); err != nil {
+			return nil, err
+		}
+		f.IsDir = (isDirInt == 1)
+		list = append(list, f)
+	}
+	return list, nil
+}
+
+func (d *Database) GetTotalStorageBytes() int64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var total sql.NullInt64
+	_ = d.db.QueryRow(`SELECT SUM(size) FROM files WHERE is_dir = 0`).Scan(&total)
+	if total.Valid {
+		return total.Int64
+	}
+	return 0
+}
+
+func (d *Database) GetStorageBytesForGuild(guildID string) int64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if guildID == "" {
+		return d.GetTotalStorageBytes()
+	}
+	var total sql.NullInt64
+	_ = d.db.QueryRow(`SELECT SUM(chunk_size) FROM chunks WHERE guild_id = ? AND status = ?`, guildID, StatusCompleted).Scan(&total)
+	if total.Valid {
+		return total.Int64
+	}
+	return 0
+}
+
+func (d *Database) GetFileCount() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var count int
+	_ = d.db.QueryRow(`SELECT COUNT(*) FROM files WHERE is_dir = 0`).Scan(&count)
+	return count
+}
+
+func (d *Database) DeleteFile(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.db.Exec(`DELETE FROM files WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	_, _ = d.db.Exec(`DELETE FROM chunks WHERE file_id = ?`, id)
+	return nil
+}
+
+func (d *Database) CreateJob(j *JobRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.db.Exec(`
+		INSERT INTO jobs (id, type, file_id, file_path, total_bytes, total_chunks, completed_chunks, status, created_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, j.ID, j.Type, j.FileID, j.FilePath, j.TotalBytes, j.TotalChunks, j.CompletedChunks, j.Status, j.CreatedAt, j.CompletedAt)
+	return err
+}
+
+func (d *Database) UpdateJobStatus(jobID string, status string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var completedAt *int64
+	if status == JobStatusCompleted || status == JobStatusFailed {
+		now := time.Now().Unix()
+		completedAt = &now
+	}
+
+	_, err := d.db.Exec(`UPDATE jobs SET status = ?, completed_at = ? WHERE id = ?`, status, completedAt, jobID)
+	return err
+}
+
+func (d *Database) IncrementJobCompletedChunks(jobID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.db.Exec(`UPDATE jobs SET completed_chunks = completed_chunks + 1 WHERE id = ?`, jobID)
+	return err
+}
+
+func (d *Database) GetJob(jobID string) (*JobRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var j JobRecord
+	err := d.db.QueryRow(`SELECT id, type, file_id, file_path, total_bytes, total_chunks, completed_chunks, status, created_at, completed_at FROM jobs WHERE id = ?`, jobID).
+		Scan(&j.ID, &j.Type, &j.FileID, &j.FilePath, &j.TotalBytes, &j.TotalChunks, &j.CompletedChunks, &j.Status, &j.CreatedAt, &j.CompletedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &j, nil
+}
+
+func (d *Database) GetActiveJobs() ([]JobRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query(`SELECT id, type, file_id, file_path, total_bytes, total_chunks, completed_chunks, status, created_at, completed_at FROM jobs WHERE status = ? ORDER BY created_at DESC`, JobStatusActive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []JobRecord
+	for rows.Next() {
+		var j JobRecord
+		if err := rows.Scan(&j.ID, &j.Type, &j.FileID, &j.FilePath, &j.TotalBytes, &j.TotalChunks, &j.CompletedChunks, &j.Status, &j.CreatedAt, &j.CompletedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, j)
+	}
+	return list, nil
+}
+
+func (d *Database) CreateChunk(c *ChunkRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.db.Exec(`
+		INSERT INTO chunks (id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, guild_id, channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, c.ID, c.JobID, c.FileID, c.ChunkIndex, c.ByteOffset, c.ChunkSize, c.SHA256, c.GuildID, c.ChannelID, c.MessageID, c.AttachmentID, c.AttachmentURL, c.Status, c.RetryCount, c.CreatedAt)
+	return err
+}
+
+func (d *Database) UpdateChunkStatus(chunkID string, status string, channelID, messageID, attachmentID, attachmentURL string) error {
+	return d.UpdateChunkStatusWithGuild(chunkID, status, "", channelID, messageID, attachmentID, attachmentURL)
+}
+
+func (d *Database) UpdateChunkStatusWithGuild(chunkID string, status string, guildID, channelID, messageID, attachmentID, attachmentURL string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var completedAt *int64
+	if status == StatusCompleted {
+		now := time.Now().Unix()
+		completedAt = &now
+	}
+
+	query := `
+		UPDATE chunks 
+		SET status = ?, channel_id = ?, message_id = ?, attachment_id = ?, attachment_url = ?, completed_at = ?`
+	var args []any
+	args = append(args, status, channelID, messageID, attachmentID, attachmentURL, completedAt)
+
+	if guildID != "" {
+		query += `, guild_id = ?`
+		args = append(args, guildID)
+	}
+
+	query += ` WHERE id = ?`
+	args = append(args, chunkID)
+
+	_, err := d.db.Exec(query, args...)
+	return err
+}
+
+func (d *Database) MarkChunkFailed(chunkID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.db.Exec(`UPDATE chunks SET status = ?, retry_count = retry_count + 1 WHERE id = ?`, StatusFailed, chunkID)
+	return err
+}
+
+func (d *Database) GetChunksForJob(jobID string) ([]ChunkRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query(`
+		SELECT id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, COALESCE(guild_id, ''), channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at, completed_at
+		FROM chunks WHERE job_id = ? ORDER BY chunk_index ASC
+	`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ChunkRecord
+	for rows.Next() {
+		var c ChunkRecord
+		var gID, chID, msgID, attID, attURL sql.NullString
+		if err := rows.Scan(&c.ID, &c.JobID, &c.FileID, &c.ChunkIndex, &c.ByteOffset, &c.ChunkSize, &c.SHA256, &gID, &chID, &msgID, &attID, &attURL, &c.Status, &c.RetryCount, &c.CreatedAt, &c.CompletedAt); err != nil {
+			return nil, err
+		}
+		c.GuildID = gID.String
+		c.ChannelID = chID.String
+		c.MessageID = msgID.String
+		c.AttachmentID = attID.String
+		c.AttachmentURL = attURL.String
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+func (d *Database) GetChunksForFile(fileID string) ([]ChunkRecord, error) {
+	return d.GetChunksForFileAndGuild(fileID, "")
+}
+
+func (d *Database) GetChunksForFileAndGuild(fileID, guildID string) ([]ChunkRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	query := `
+		SELECT id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, COALESCE(guild_id, ''), channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at, completed_at
+		FROM chunks WHERE file_id = ? AND status = ?`
+	var args []any
+	args = append(args, fileID, StatusCompleted)
+
+	if guildID != "" {
+		query += ` AND guild_id = ?`
+		args = append(args, guildID)
+	}
+	query += ` ORDER BY chunk_index ASC`
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ChunkRecord
+	for rows.Next() {
+		var c ChunkRecord
+		var gID, chID, msgID, attID, attURL sql.NullString
+		if err := rows.Scan(&c.ID, &c.JobID, &c.FileID, &c.ChunkIndex, &c.ByteOffset, &c.ChunkSize, &c.SHA256, &gID, &chID, &msgID, &attID, &attURL, &c.Status, &c.RetryCount, &c.CreatedAt, &c.CompletedAt); err != nil {
+			return nil, err
+		}
+		c.GuildID = gID.String
+		c.ChannelID = chID.String
+		c.MessageID = msgID.String
+		c.AttachmentID = attID.String
+		c.AttachmentURL = attURL.String
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+func (d *Database) GetAvailableGuildsForFile(fileID string) ([]string, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query(`SELECT DISTINCT guild_id FROM chunks WHERE file_id = ? AND status = ? AND guild_id != ''`, fileID, StatusCompleted)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var guilds []string
+	for rows.Next() {
+		var g string
+		if err := rows.Scan(&g); err == nil && g != "" {
+			guilds = append(guilds, g)
+		}
+	}
+	return guilds, nil
+}
+
+func (d *Database) GetPendingChunks(jobID string) ([]ChunkRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query(`
+		SELECT id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, COALESCE(guild_id, ''), channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at, completed_at
+		FROM chunks WHERE job_id = ? AND status != ? ORDER BY chunk_index ASC
+	`, jobID, StatusCompleted)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ChunkRecord
+	for rows.Next() {
+		var c ChunkRecord
+		var gID, chID, msgID, attID, attURL sql.NullString
+		if err := rows.Scan(&c.ID, &c.JobID, &c.FileID, &c.ChunkIndex, &c.ByteOffset, &c.ChunkSize, &c.SHA256, &gID, &chID, &msgID, &attID, &attURL, &c.Status, &c.RetryCount, &c.CreatedAt, &c.CompletedAt); err != nil {
+			return nil, err
+		}
+		c.GuildID = gID.String
+		c.ChannelID = chID.String
+		c.MessageID = msgID.String
+		c.AttachmentID = attID.String
+		c.AttachmentURL = attURL.String
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+func (d *Database) FindCompletedChunkBySHA256(sha256Hash string) (*ChunkRecord, error) {
+	if sha256Hash == "" {
+		return nil, nil
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var c ChunkRecord
+	var gID, chID, msgID, attID, attURL sql.NullString
+	err := d.db.QueryRow(`
+		SELECT id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, COALESCE(guild_id, ''), channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at, completed_at
+		FROM chunks
+		WHERE sha256 = ? AND status = ? AND message_id IS NOT NULL AND message_id != ''
+		ORDER BY created_at DESC LIMIT 1
+	`, sha256Hash, StatusCompleted).Scan(
+		&c.ID, &c.JobID, &c.FileID, &c.ChunkIndex, &c.ByteOffset, &c.ChunkSize, &c.SHA256,
+		&gID, &chID, &msgID, &attID, &attURL, &c.Status,
+		&c.RetryCount, &c.CreatedAt, &c.CompletedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	c.GuildID = gID.String
+	c.ChannelID = chID.String
+	c.MessageID = msgID.String
+	c.AttachmentID = attID.String
+	c.AttachmentURL = attURL.String
+	return &c, nil
+}
+
+func (d *Database) FindAllCompletedChunksBySHA256(sha256Hash string) ([]ChunkRecord, error) {
+	if sha256Hash == "" {
+		return nil, nil
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query(`
+		SELECT id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, COALESCE(guild_id, ''), channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at, completed_at
+		FROM chunks
+		WHERE sha256 = ? AND status = ? AND message_id IS NOT NULL AND message_id != ''
+		ORDER BY created_at DESC
+	`, sha256Hash, StatusCompleted)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []ChunkRecord
+	for rows.Next() {
+		var c ChunkRecord
+		var gID, chID, msgID, attID, attURL sql.NullString
+		if err := rows.Scan(
+			&c.ID, &c.JobID, &c.FileID, &c.ChunkIndex, &c.ByteOffset, &c.ChunkSize, &c.SHA256,
+			&gID, &chID, &msgID, &attID, &attURL, &c.Status,
+			&c.RetryCount, &c.CreatedAt, &c.CompletedAt,
+		); err == nil {
+			c.GuildID = gID.String
+			c.ChannelID = chID.String
+			c.MessageID = msgID.String
+			c.AttachmentID = attID.String
+			c.AttachmentURL = attURL.String
+			list = append(list, c)
+		}
+	}
+	return list, nil
+}
+
+func (d *Database) UpdateChunkHash(chunkID string, sha256Hash string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec(`UPDATE chunks SET sha256 = ? WHERE id = ?`, sha256Hash, chunkID)
+	return err
+}
+
+func (d *Database) UpsertBotNode(n *BotNodeRecord) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	_, err := d.db.Exec(`
+		INSERT INTO bot_nodes (id, bot_token, guild_id, bot_name, guild_name, status, ping_ms, channel_count, storage_bytes, created_at, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			bot_token = excluded.bot_token,
+			guild_id = excluded.guild_id,
+			bot_name = excluded.bot_name,
+			guild_name = excluded.guild_name,
+			status = excluded.status,
+			ping_ms = excluded.ping_ms,
+			channel_count = excluded.channel_count,
+			storage_bytes = excluded.storage_bytes,
+			last_seen = excluded.last_seen
+	`, n.ID, n.BotToken, n.GuildID, n.BotName, n.GuildName, n.Status, n.PingMs, n.ChannelCount, n.StorageBytes, n.CreatedAt, n.LastSeen)
+	return err
+}
+
+func (d *Database) GetAllBotNodes() ([]BotNodeRecord, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	rows, err := d.db.Query(`SELECT id, bot_token, guild_id, bot_name, guild_name, status, ping_ms, channel_count, storage_bytes, created_at, last_seen FROM bot_nodes ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []BotNodeRecord
+	for rows.Next() {
+		var n BotNodeRecord
+		var bName, gName, status sql.NullString
+		if err := rows.Scan(&n.ID, &n.BotToken, &n.GuildID, &bName, &gName, &status, &n.PingMs, &n.ChannelCount, &n.StorageBytes, &n.CreatedAt, &n.LastSeen); err != nil {
+			return nil, err
+		}
+		n.BotName = bName.String
+		n.GuildName = gName.String
+		n.Status = status.String
+		list = append(list, n)
+	}
+	return list, nil
+}
+
+func (d *Database) DeleteBotNode(id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.db.Exec(`DELETE FROM bot_nodes WHERE id = ?`, id)
+	return err
+}
