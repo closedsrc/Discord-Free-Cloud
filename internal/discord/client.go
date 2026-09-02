@@ -59,6 +59,11 @@ type Client struct {
 	httpClient *http.Client
 	limiters   sync.Map
 	globalLock RateLimitTracker
+
+	// category pool configuration
+	poolPrefix   string
+	baseCatsMu   sync.Mutex
+	baseCats     map[string]string // guild id -> base category id ("" = auto-create)
 }
 
 func NewClient(botToken string) *Client {
@@ -76,11 +81,52 @@ func NewClient(botToken string) *Client {
 				ReadBufferSize:      128 * 1024,
 			},
 		},
+		poolPrefix: "files",
+		baseCats:   make(map[string]string),
 	}
 }
 
 func (c *Client) SetBotToken(token string) {
 	c.botToken = token
+}
+
+// SetPoolPrefix sets the category name prefix used when auto-creating
+// storage categories (default "files").
+func (c *Client) SetPoolPrefix(prefix string) {
+	if strings.TrimSpace(prefix) != "" {
+		c.poolPrefix = strings.TrimSpace(prefix)
+	}
+}
+
+// SetBaseCategory pins the storage category for a guild. When empty the
+// client auto-creates a category named PoolPrefix.
+func (c *Client) SetBaseCategory(guildID, categoryID string) {
+	c.baseCatsMu.Lock()
+	defer c.baseCatsMu.Unlock()
+	if categoryID == "" {
+		delete(c.baseCats, guildID)
+		return
+	}
+	c.baseCats[guildID] = categoryID
+}
+
+func (c *Client) baseCategoryFor(guildID string) string {
+	c.baseCatsMu.Lock()
+	defer c.baseCatsMu.Unlock()
+	return c.baseCats[guildID]
+}
+
+// CloneForToken returns a copy of this client configured with a different bot
+// token, carrying over the pool prefix and per-guild base category mapping.
+func (c *Client) CloneForToken(token string) *Client {
+	nc := NewClient(token)
+	nc.poolPrefix = c.poolPrefix
+	c.baseCatsMu.Lock()
+	for g, id := range c.baseCats {
+		nc.baseCats[g] = id
+	}
+	c.baseCatsMu.Unlock()
+	return nc
 }
 
 func (c *Client) getLimiter(key string) *RateLimitTracker {
@@ -815,38 +861,18 @@ func (c *Client) SetupServer(ctx context.Context, guildID string) (*SetupResult,
 		return nil, errors.New("bot token and server id needed")
 	}
 
-	getChReq, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/guilds/%s/channels", DiscordAPIBase, guildID), nil)
+	channels, err := c.listGuildChannels(ctx, guildID)
 	if err != nil {
 		return nil, err
 	}
-	getChReq.Header.Set("Authorization", "Bot "+c.botToken)
-
-	resp, err := c.httpClient.Do(getChReq)
-	if err != nil {
-		return nil, fmt.Errorf("could not check discord channels %w", err)
-	}
-	chBody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	var existingChannels []Channel
-	_ = json.Unmarshal(chBody, &existingChannels)
 
 	var metaChannel *Channel
-	var storageChannels []ProvisionItem
-
-	for _, ch := range existingChannels {
+	for _, ch := range channels {
 		if ch.Type == 0 {
 			normName := strings.ToLower(strings.ReplaceAll(ch.Name, "-", " "))
 			if strings.Contains(normName, "metadata") || strings.Contains(normName, "catalog") {
 				metaChannel = &ch
-			} else if strings.HasPrefix(normName, "storage") || strings.HasPrefix(normName, "part") || strings.HasPrefix(normName, "shard") {
-				wh, _ := c.CreateWebhook(ctx, ch.ID, ch.Name)
-				if wh != nil && wh.URL != "" {
-					storageChannels = append(storageChannels, ProvisionItem{
-						Channel: ch,
-						Webhook: *wh,
-					})
-				}
+				break
 			}
 		}
 	}
@@ -863,7 +889,7 @@ func (c *Client) SetupServer(ctx context.Context, guildID string) (*SetupResult,
 		req.Header.Set("Authorization", "Bot "+c.botToken)
 		req.Header.Set("Content-Type", "application/json")
 
-		resp, err = c.httpClient.Do(req)
+		resp, err := c.httpClient.Do(req)
 		if err == nil {
 			metaResp, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -873,16 +899,12 @@ func (c *Client) SetupServer(ctx context.Context, guildID string) (*SetupResult,
 		}
 	}
 
-	if len(storageChannels) < 4 {
-		needed := 4 - len(storageChannels)
-		startIndex := len(storageChannels) + 1
-		for i := 0; i < needed; i++ {
-			chName := fmt.Sprintf("storage %02d", startIndex+i)
-			prov, err := c.CreateChannel(ctx, guildID, "", chName, "Fast cloud storage shard")
-			if err == nil && prov != nil {
-				storageChannels = append(storageChannels, *prov)
-			}
-		}
+	// Storage channels live inside categories (base category or auto-created
+	// "files"), each with its own webhook, spilling into new categories as the
+	// pool grows. See SyncPool.
+	storageChannels, err := c.SyncPool(ctx, guildID, DefaultPoolTarget)
+	if err != nil {
+		return nil, err
 	}
 
 	res := &SetupResult{

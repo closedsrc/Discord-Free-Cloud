@@ -3,12 +3,10 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const (
@@ -106,20 +104,21 @@ type BotNodeRecord struct {
 	LastSeen     int64  `json:"last_seen"`
 }
 
-func InitDB(dbPath string) (*Database, error) {
-	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("could not create folder %w", err)
+// InitDB opens a PostgreSQL database from a DSN (e.g.
+// postgres://user:pass@host:port/db?sslmode=require) and ensures the schema.
+func InitDB(dsn string) (*Database, error) {
+	if dsn == "" {
+		return nil, fmt.Errorf("database connection string is empty")
 	}
 
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=cache_size(-32000)&_pragma=temp_store(MEMORY)&_pragma=mmap_size(268435456)", dbPath)
-	sqlDB, err := sql.Open("sqlite", dsn)
+	sqlDB, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("could not open database %w", err)
 	}
 
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetMaxOpenConns(10)
+	sqlDB.SetMaxIdleConns(5)
+	sqlDB.SetConnMaxLifetime(10 * time.Minute)
 
 	d := &Database{db: sqlDB}
 	if err := d.migrate(); err != nil {
@@ -142,12 +141,13 @@ func (d *Database) migrate() error {
 	);
 
 	CREATE TABLE IF NOT EXISTS channels (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		id BIGSERIAL PRIMARY KEY,
 		channel_id TEXT UNIQUE NOT NULL,
 		channel_name TEXT NOT NULL,
 		webhook_url TEXT,
 		guild_id TEXT DEFAULT '',
 		bot_token TEXT DEFAULT '',
+		category_id TEXT DEFAULT '',
 		is_metadata INTEGER DEFAULT 0
 	);
 
@@ -156,12 +156,12 @@ func (d *Database) migrate() error {
 		parent_id TEXT,
 		name TEXT NOT NULL,
 		path TEXT UNIQUE NOT NULL,
-		size INTEGER NOT NULL,
+		size BIGINT NOT NULL,
 		is_dir INTEGER DEFAULT 0,
-		mod_time INTEGER NOT NULL,
+		mod_time BIGINT NOT NULL,
 		sha256 TEXT NOT NULL,
 		mime_type TEXT,
-		created_at INTEGER NOT NULL
+		created_at BIGINT NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS jobs (
@@ -169,12 +169,12 @@ func (d *Database) migrate() error {
 		type TEXT NOT NULL,
 		file_id TEXT NOT NULL,
 		file_path TEXT NOT NULL,
-		total_bytes INTEGER NOT NULL,
+		total_bytes BIGINT NOT NULL,
 		total_chunks INTEGER NOT NULL,
 		completed_chunks INTEGER DEFAULT 0,
 		status TEXT NOT NULL,
-		created_at INTEGER NOT NULL,
-		completed_at INTEGER
+		created_at BIGINT NOT NULL,
+		completed_at BIGINT
 	);
 
 	CREATE TABLE IF NOT EXISTS chunks (
@@ -182,7 +182,7 @@ func (d *Database) migrate() error {
 		job_id TEXT NOT NULL,
 		file_id TEXT NOT NULL,
 		chunk_index INTEGER NOT NULL,
-		byte_offset INTEGER NOT NULL,
+		byte_offset BIGINT NOT NULL,
 		chunk_size INTEGER NOT NULL,
 		sha256 TEXT NOT NULL,
 		guild_id TEXT DEFAULT '',
@@ -192,9 +192,9 @@ func (d *Database) migrate() error {
 		attachment_url TEXT,
 		status TEXT NOT NULL,
 		retry_count INTEGER DEFAULT 0,
-		created_at INTEGER NOT NULL,
-		completed_at INTEGER,
-		FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+		created_at BIGINT NOT NULL,
+		completed_at BIGINT,
+		CONSTRAINT fk_chunks_job FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
 	);
 
 	CREATE TABLE IF NOT EXISTS bot_nodes (
@@ -204,25 +204,21 @@ func (d *Database) migrate() error {
 		bot_name TEXT,
 		guild_name TEXT,
 		status TEXT DEFAULT 'Active',
-		ping_ms INTEGER DEFAULT 0,
+		ping_ms BIGINT DEFAULT 0,
 		channel_count INTEGER DEFAULT 0,
-		storage_bytes INTEGER DEFAULT 0,
-		created_at INTEGER NOT NULL,
-		last_seen INTEGER DEFAULT 0
+		storage_bytes BIGINT DEFAULT 0,
+		created_at BIGINT NOT NULL,
+		last_seen BIGINT DEFAULT 0,
+		bot_id TEXT DEFAULT '',
+		invite_url TEXT DEFAULT ''
 	);
 	`
-	_, err := d.db.Exec(schema)
-	if err != nil {
+	if _, err := d.db.Exec(schema); err != nil {
 		return err
 	}
 
-	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN guild_id TEXT DEFAULT ''")
-	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN bot_token TEXT DEFAULT ''")
-	_, _ = d.db.Exec("ALTER TABLE chunks ADD COLUMN guild_id TEXT DEFAULT ''")
-	_, _ = d.db.Exec("ALTER TABLE bot_nodes ADD COLUMN storage_bytes INTEGER DEFAULT 0")
-	_, _ = d.db.Exec("ALTER TABLE bot_nodes ADD COLUMN last_seen INTEGER DEFAULT 0")
-	_, _ = d.db.Exec("ALTER TABLE bot_nodes ADD COLUMN bot_id TEXT DEFAULT ''")
-	_, _ = d.db.Exec("ALTER TABLE bot_nodes ADD COLUMN invite_url TEXT DEFAULT ''")
+	// Ensure newer columns exist (idempotent for upgrades).
+	_, _ = d.db.Exec("ALTER TABLE channels ADD COLUMN IF NOT EXISTS category_id TEXT DEFAULT ''")
 
 	indexes := `
 	CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent_id);
@@ -232,11 +228,11 @@ func (d *Database) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_chunks_status ON chunks(status);
 	CREATE INDEX IF NOT EXISTS idx_chunks_guild ON chunks(guild_id);
 	CREATE INDEX IF NOT EXISTS idx_channels_guild ON channels(guild_id);
+	CREATE INDEX IF NOT EXISTS idx_channels_category ON channels(category_id);
 	CREATE INDEX IF NOT EXISTS idx_chunks_sha256 ON chunks(sha256);
 	CREATE INDEX IF NOT EXISTS idx_chunks_file_idx ON chunks(file_id, chunk_index);
 	`
-	_, err = d.db.Exec(indexes)
-	if err != nil {
+	if _, err := d.db.Exec(indexes); err != nil {
 		return err
 	}
 
@@ -249,17 +245,17 @@ func (d *Database) ResetIncomplete() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	_, err := d.db.Exec(`UPDATE chunks SET status = ? WHERE status = ?`, StatusPending, StatusUploading)
+	_, err := d.db.Exec(`UPDATE chunks SET status = $1 WHERE status = $2`, StatusPending, StatusUploading)
 	if err != nil {
 		return err
 	}
 
 	_, err = d.db.Exec(`
-		UPDATE jobs 
+		UPDATE jobs
 		SET completed_chunks = (
-			SELECT COUNT(*) FROM chunks WHERE chunks.job_id = jobs.id AND chunks.status = ?
+			SELECT COUNT(*) FROM chunks WHERE chunks.job_id = jobs.id AND chunks.status = $1
 		)
-		WHERE status = ?
+		WHERE status = $2
 	`, StatusCompleted, JobStatusActive)
 
 	return err
@@ -269,7 +265,7 @@ func (d *Database) SetSetting(key, value string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	_, err := d.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	_, err := d.db.Exec(`INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value`, key, value)
 	return err
 }
 
@@ -278,7 +274,7 @@ func (d *Database) GetSetting(key string) (string, error) {
 	defer d.mu.RUnlock()
 
 	var val string
-	err := d.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&val)
+	err := d.db.QueryRow(`SELECT value FROM settings WHERE key = $1`, key).Scan(&val)
 	if err != nil {
 		return "", err
 	}
@@ -320,7 +316,7 @@ func (d *Database) ClearChannelsForGuild(guildID string) error {
 		_, err := d.db.Exec(`DELETE FROM channels`)
 		return err
 	}
-	_, err := d.db.Exec(`DELETE FROM channels WHERE guild_id = ?`, guildID)
+	_, err := d.db.Exec(`DELETE FROM channels WHERE guild_id = $1`, guildID)
 	return err
 }
 
@@ -329,6 +325,11 @@ func (d *Database) AddChannel(channelID, channelName, webhookURL string, isMetad
 }
 
 func (d *Database) AddChannelWithGuild(channelID, channelName, webhookURL, guildID, botToken string, isMetadata bool) error {
+	return d.AddChannelFull(channelID, channelName, webhookURL, guildID, botToken, "", isMetadata)
+}
+
+// AddChannelFull records a storage channel with its parent category id.
+func (d *Database) AddChannelFull(channelID, channelName, webhookURL, guildID, botToken, categoryID string, isMetadata bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -338,15 +339,16 @@ func (d *Database) AddChannelWithGuild(channelID, channelName, webhookURL, guild
 	}
 
 	_, err := d.db.Exec(`
-		INSERT INTO channels (channel_id, channel_name, webhook_url, guild_id, bot_token, is_metadata)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO channels (channel_id, channel_name, webhook_url, guild_id, bot_token, category_id, is_metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT(channel_id) DO UPDATE SET
-			channel_name = excluded.channel_name,
-			webhook_url = excluded.webhook_url,
-			guild_id = excluded.guild_id,
-			bot_token = excluded.bot_token,
-			is_metadata = excluded.is_metadata
-	`, channelID, channelName, webhookURL, guildID, botToken, isMetaInt)
+			channel_name = EXCLUDED.channel_name,
+			webhook_url = EXCLUDED.webhook_url,
+			guild_id = EXCLUDED.guild_id,
+			bot_token = EXCLUDED.bot_token,
+			category_id = EXCLUDED.category_id,
+			is_metadata = EXCLUDED.is_metadata
+	`, channelID, channelName, webhookURL, guildID, botToken, categoryID, isMetaInt)
 	return err
 }
 
@@ -354,7 +356,7 @@ func (d *Database) GetChannelsByGuild(guildID string) ([]ChannelRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	query := `SELECT id, channel_id, channel_name, webhook_url, COALESCE(guild_id, ''), COALESCE(bot_token, ''), is_metadata FROM channels WHERE guild_id = ? ORDER BY id ASC`
+	query := `SELECT id, channel_id, channel_name, webhook_url, COALESCE(guild_id, ''), COALESCE(bot_token, ''), is_metadata FROM channels WHERE guild_id = $1 ORDER BY id ASC`
 	rows, err := d.db.Query(query, guildID)
 	if err != nil {
 		return nil, err
@@ -385,7 +387,7 @@ func (d *Database) GetStorageChannelsForGuild(guildID string) ([]ChannelRecord, 
 	query := `SELECT id, channel_id, channel_name, webhook_url, COALESCE(guild_id, ''), COALESCE(bot_token, ''), is_metadata FROM channels WHERE is_metadata = 0`
 	var args []any
 	if guildID != "" {
-		query += ` AND guild_id = ?`
+		query += ` AND guild_id = $1`
 		args = append(args, guildID)
 	}
 	query += ` ORDER BY id ASC`
@@ -420,7 +422,7 @@ func (d *Database) GetMetadataChannelForGuild(guildID string) (*ChannelRecord, e
 	query := `SELECT id, channel_id, channel_name, webhook_url, COALESCE(guild_id, ''), COALESCE(bot_token, ''), is_metadata FROM channels WHERE is_metadata = 1`
 	var args []any
 	if guildID != "" {
-		query += ` AND guild_id = ?`
+		query += ` AND guild_id = $1`
 		args = append(args, guildID)
 	}
 	query += ` LIMIT 1`
@@ -447,15 +449,15 @@ func (d *Database) UpsertFile(f *FileRecord) error {
 
 	_, err := d.db.Exec(`
 		INSERT INTO files (id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT(path) DO UPDATE SET
-			parent_id = excluded.parent_id,
-			name = excluded.name,
-			size = excluded.size,
-			is_dir = excluded.is_dir,
-			mod_time = excluded.mod_time,
-			sha256 = excluded.sha256,
-			mime_type = excluded.mime_type
+			parent_id = EXCLUDED.parent_id,
+			name = EXCLUDED.name,
+			size = EXCLUDED.size,
+			is_dir = EXCLUDED.is_dir,
+			mod_time = EXCLUDED.mod_time,
+			sha256 = EXCLUDED.sha256,
+			mime_type = EXCLUDED.mime_type
 	`, f.ID, f.ParentID, f.Name, f.Path, f.Size, isDirInt, f.ModTime, f.SHA256, f.MimeType, f.CreatedAt)
 	return err
 }
@@ -466,7 +468,7 @@ func (d *Database) GetFile(id string) (*FileRecord, error) {
 
 	var f FileRecord
 	var isDirInt int
-	err := d.db.QueryRow(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE id = ?`, id).
+	err := d.db.QueryRow(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE id = $1`, id).
 		Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -481,7 +483,7 @@ func (d *Database) GetFileByPath(path string) (*FileRecord, error) {
 
 	var f FileRecord
 	var isDirInt int
-	err := d.db.QueryRow(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE path = ?`, path).
+	err := d.db.QueryRow(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE path = $1`, path).
 		Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -499,7 +501,7 @@ func (d *Database) ListFiles(parentID string) ([]FileRecord, error) {
 	if parentID == "" {
 		query = `SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE parent_id = '' OR parent_id IS NULL OR parent_id NOT IN (SELECT id FROM files WHERE is_dir = 1) ORDER BY is_dir DESC, name ASC`
 	} else {
-		query = `SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE parent_id = ? ORDER BY is_dir DESC, name ASC`
+		query = `SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE parent_id = $1 ORDER BY is_dir DESC, name ASC`
 		args = append(args, parentID)
 	}
 
@@ -568,7 +570,7 @@ func (d *Database) GuildStorageBytes(guildID string) int64 {
 		return 0
 	}
 	var total sql.NullInt64
-	_ = d.db.QueryRow(`SELECT SUM(chunk_size) FROM chunks WHERE guild_id = ? AND status = ?`, guildID, StatusCompleted).Scan(&total)
+	_ = d.db.QueryRow(`SELECT SUM(chunk_size) FROM chunks WHERE guild_id = $1 AND status = $2`, guildID, StatusCompleted).Scan(&total)
 	if total.Valid {
 		return total.Int64
 	}
@@ -587,11 +589,11 @@ func (d *Database) DeleteFile(id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	_, err := d.db.Exec(`DELETE FROM files WHERE id = ?`, id)
+	_, err := d.db.Exec(`DELETE FROM files WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
-	_, _ = d.db.Exec(`DELETE FROM chunks WHERE file_id = ?`, id)
+	_, _ = d.db.Exec(`DELETE FROM chunks WHERE file_id = $1`, id)
 	return nil
 }
 
@@ -601,7 +603,7 @@ func (d *Database) CreateJob(j *JobRecord) error {
 
 	_, err := d.db.Exec(`
 		INSERT INTO jobs (id, type, file_id, file_path, total_bytes, total_chunks, completed_chunks, status, created_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`, j.ID, j.Type, j.FileID, j.FilePath, j.TotalBytes, j.TotalChunks, j.CompletedChunks, j.Status, j.CreatedAt, j.CompletedAt)
 	return err
 }
@@ -616,7 +618,7 @@ func (d *Database) UpdateJobStatus(jobID string, status string) error {
 		completedAt = &now
 	}
 
-	_, err := d.db.Exec(`UPDATE jobs SET status = ?, completed_at = ? WHERE id = ?`, status, completedAt, jobID)
+	_, err := d.db.Exec(`UPDATE jobs SET status = $1, completed_at = $2 WHERE id = $3`, status, completedAt, jobID)
 	return err
 }
 
@@ -624,7 +626,7 @@ func (d *Database) IncrementJobCompletedChunks(jobID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	_, err := d.db.Exec(`UPDATE jobs SET completed_chunks = completed_chunks + 1 WHERE id = ?`, jobID)
+	_, err := d.db.Exec(`UPDATE jobs SET completed_chunks = completed_chunks + 1 WHERE id = $1`, jobID)
 	return err
 }
 
@@ -633,7 +635,7 @@ func (d *Database) GetJob(jobID string) (*JobRecord, error) {
 	defer d.mu.RUnlock()
 
 	var j JobRecord
-	err := d.db.QueryRow(`SELECT id, type, file_id, file_path, total_bytes, total_chunks, completed_chunks, status, created_at, completed_at FROM jobs WHERE id = ?`, jobID).
+	err := d.db.QueryRow(`SELECT id, type, file_id, file_path, total_bytes, total_chunks, completed_chunks, status, created_at, completed_at FROM jobs WHERE id = $1`, jobID).
 		Scan(&j.ID, &j.Type, &j.FileID, &j.FilePath, &j.TotalBytes, &j.TotalChunks, &j.CompletedChunks, &j.Status, &j.CreatedAt, &j.CompletedAt)
 	if err != nil {
 		return nil, err
@@ -645,7 +647,7 @@ func (d *Database) GetActiveJobs() ([]JobRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	rows, err := d.db.Query(`SELECT id, type, file_id, file_path, total_bytes, total_chunks, completed_chunks, status, created_at, completed_at FROM jobs WHERE status = ? ORDER BY created_at DESC`, JobStatusActive)
+	rows, err := d.db.Query(`SELECT id, type, file_id, file_path, total_bytes, total_chunks, completed_chunks, status, created_at, completed_at FROM jobs WHERE status = $1 ORDER BY created_at DESC`, JobStatusActive)
 	if err != nil {
 		return nil, err
 	}
@@ -668,7 +670,7 @@ func (d *Database) CreateChunk(c *ChunkRecord) error {
 
 	_, err := d.db.Exec(`
 		INSERT INTO chunks (id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, guild_id, channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`, c.ID, c.JobID, c.FileID, c.ChunkIndex, c.ByteOffset, c.ChunkSize, c.SHA256, c.GuildID, c.ChannelID, c.MessageID, c.AttachmentID, c.AttachmentURL, c.Status, c.RetryCount, c.CreatedAt)
 	return err
 }
@@ -688,17 +690,17 @@ func (d *Database) UpdateChunkWithGuild(chunkID string, status string, guildID, 
 	}
 
 	query := `
-		UPDATE chunks 
-		SET status = ?, channel_id = ?, message_id = ?, attachment_id = ?, attachment_url = ?, completed_at = ?`
+		UPDATE chunks
+		SET status = $1, channel_id = $2, message_id = $3, attachment_id = $4, attachment_url = $5, completed_at = $6`
 	var args []any
 	args = append(args, status, channelID, messageID, attachmentID, attachmentURL, completedAt)
 
 	if guildID != "" {
-		query += `, guild_id = ?`
+		query += `, guild_id = $7`
 		args = append(args, guildID)
 	}
 
-	query += ` WHERE id = ?`
+	query += ` WHERE id = $8`
 	args = append(args, chunkID)
 
 	_, err := d.db.Exec(query, args...)
@@ -709,8 +711,45 @@ func (d *Database) MarkChunkFailed(chunkID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	_, err := d.db.Exec(`UPDATE chunks SET status = ?, retry_count = retry_count + 1 WHERE id = ?`, StatusFailed, chunkID)
+	_, err := d.db.Exec(`UPDATE chunks SET status = $1, retry_count = retry_count + 1 WHERE id = $2`, StatusFailed, chunkID)
 	return err
+}
+
+// UpdateChunkComplete writes the completed chunk state (status, location ids,
+// sha256) in a single atomic statement so a partial failure can never leave a
+// chunk half-written (e.g. sha set but status PENDING).
+func (d *Database) UpdateChunkComplete(chunkID, guildID, channelID, messageID, attachmentID, attachmentURL, sha256 string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	completedAt := time.Now().Unix()
+	_, err := d.db.Exec(`
+		UPDATE chunks
+		SET status = $1, channel_id = $2, message_id = $3, attachment_id = $4,
+		    attachment_url = $5, completed_at = $6, sha256 = $7, guild_id = $8
+		WHERE id = $9`,
+		StatusCompleted, channelID, messageID, attachmentID, attachmentURL, completedAt, sha256, guildID, chunkID)
+	return err
+}
+
+// CountCompletedChunksForFile returns how many completed chunk copies exist
+// for a file (across all guilds).
+func (d *Database) CountCompletedChunksForFile(fileID string) (int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var n int
+	err := d.db.QueryRow(`SELECT COUNT(*) FROM chunks WHERE file_id = $1 AND status = $2`, fileID, StatusCompleted).Scan(&n)
+	return n, err
+}
+
+// CountCompletedChunksForJob returns how many chunk copies of a single upload
+// job reached COMPLETED across all target servers.
+func (d *Database) CountCompletedChunksForJob(jobID string) (int, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var n int
+	err := d.db.QueryRow(`SELECT COUNT(*) FROM chunks WHERE job_id = $1 AND status = $2`, jobID, StatusCompleted).Scan(&n)
+	return n, err
 }
 
 func (d *Database) GetChunksForJob(jobID string) ([]ChunkRecord, error) {
@@ -719,7 +758,7 @@ func (d *Database) GetChunksForJob(jobID string) ([]ChunkRecord, error) {
 
 	rows, err := d.db.Query(`
 		SELECT id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, COALESCE(guild_id, ''), channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at, completed_at
-		FROM chunks WHERE job_id = ? ORDER BY chunk_index ASC
+		FROM chunks WHERE job_id = $1 ORDER BY chunk_index ASC
 	`, jobID)
 	if err != nil {
 		return nil, err
@@ -753,7 +792,7 @@ func (d *Database) GetAllChunksForFile(fileID string) ([]ChunkRecord, error) {
 
 	rows, err := d.db.Query(`
 		SELECT id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, COALESCE(guild_id, ''), channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at, completed_at
-		FROM chunks WHERE file_id = ? ORDER BY chunk_index ASC
+		FROM chunks WHERE file_id = $1 ORDER BY chunk_index ASC
 	`, fileID)
 	if err != nil {
 		return nil, err
@@ -783,12 +822,12 @@ func (d *Database) GetChunksForFileAndGuild(fileID, guildID string) ([]ChunkReco
 
 	query := `
 		SELECT id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, COALESCE(guild_id, ''), channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at, completed_at
-		FROM chunks WHERE file_id = ? AND status = ?`
+		FROM chunks WHERE file_id = $1 AND status = $2`
 	var args []any
 	args = append(args, fileID, StatusCompleted)
 
 	if guildID != "" {
-		query += ` AND guild_id = ?`
+		query += ` AND guild_id = $3`
 		args = append(args, guildID)
 	}
 	query += ` ORDER BY chunk_index ASC`
@@ -820,7 +859,7 @@ func (d *Database) GetAvailableGuildsForFile(fileID string) ([]string, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	rows, err := d.db.Query(`SELECT DISTINCT guild_id FROM chunks WHERE file_id = ? AND status = ? AND guild_id != ''`, fileID, StatusCompleted)
+	rows, err := d.db.Query(`SELECT DISTINCT guild_id FROM chunks WHERE file_id = $1 AND status = $2 AND guild_id != ''`, fileID, StatusCompleted)
 	if err != nil {
 		return nil, err
 	}
@@ -842,7 +881,7 @@ func (d *Database) GetPendingChunks(jobID string) ([]ChunkRecord, error) {
 
 	rows, err := d.db.Query(`
 		SELECT id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, COALESCE(guild_id, ''), channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at, completed_at
-		FROM chunks WHERE job_id = ? AND status != ? ORDER BY chunk_index ASC
+		FROM chunks WHERE job_id = $1 AND status != $2 ORDER BY chunk_index ASC
 	`, jobID, StatusCompleted)
 	if err != nil {
 		return nil, err
@@ -878,7 +917,7 @@ func (d *Database) FindChunkByHash(sha256Hash string) (*ChunkRecord, error) {
 	err := d.db.QueryRow(`
 		SELECT id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, COALESCE(guild_id, ''), channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at, completed_at
 		FROM chunks
-		WHERE sha256 = ? AND status = ? AND message_id IS NOT NULL AND message_id != ''
+		WHERE sha256 = $1 AND status = $2 AND message_id IS NOT NULL AND message_id != ''
 		ORDER BY created_at DESC LIMIT 1
 	`, sha256Hash, StatusCompleted).Scan(
 		&c.ID, &c.JobID, &c.FileID, &c.ChunkIndex, &c.ByteOffset, &c.ChunkSize, &c.SHA256,
@@ -906,7 +945,7 @@ func (d *Database) FindChunksByHash(sha256Hash string) ([]ChunkRecord, error) {
 	rows, err := d.db.Query(`
 		SELECT id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, COALESCE(guild_id, ''), channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at, completed_at
 		FROM chunks
-		WHERE sha256 = ? AND status = ? AND message_id IS NOT NULL AND message_id != ''
+		WHERE sha256 = $1 AND status = $2 AND message_id IS NOT NULL AND message_id != ''
 		ORDER BY created_at DESC
 	`, sha256Hash, StatusCompleted)
 	if err != nil {
@@ -937,7 +976,7 @@ func (d *Database) FindChunksByHash(sha256Hash string) ([]ChunkRecord, error) {
 func (d *Database) UpdateChunkHash(chunkID string, sha256Hash string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_, err := d.db.Exec(`UPDATE chunks SET sha256 = ? WHERE id = ?`, sha256Hash, chunkID)
+	_, err := d.db.Exec(`UPDATE chunks SET sha256 = $1 WHERE id = $2`, sha256Hash, chunkID)
 	return err
 }
 
@@ -947,19 +986,19 @@ func (d *Database) UpsertBotNode(n *BotNodeRecord) error {
 
 	_, err := d.db.Exec(`
 		INSERT INTO bot_nodes (id, bot_token, guild_id, bot_name, guild_name, status, ping_ms, channel_count, storage_bytes, created_at, last_seen, bot_id, invite_url)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT(id) DO UPDATE SET
-			bot_token = excluded.bot_token,
-			guild_id = excluded.guild_id,
-			bot_name = excluded.bot_name,
-			guild_name = excluded.guild_name,
-			status = excluded.status,
-			ping_ms = excluded.ping_ms,
-			channel_count = excluded.channel_count,
-			storage_bytes = excluded.storage_bytes,
-			last_seen = excluded.last_seen,
-			bot_id = excluded.bot_id,
-			invite_url = excluded.invite_url
+			bot_token = EXCLUDED.bot_token,
+			guild_id = EXCLUDED.guild_id,
+			bot_name = EXCLUDED.bot_name,
+			guild_name = EXCLUDED.guild_name,
+			status = EXCLUDED.status,
+			ping_ms = EXCLUDED.ping_ms,
+			channel_count = EXCLUDED.channel_count,
+			storage_bytes = EXCLUDED.storage_bytes,
+			last_seen = EXCLUDED.last_seen,
+			bot_id = EXCLUDED.bot_id,
+			invite_url = EXCLUDED.invite_url
 	`, n.ID, n.BotToken, n.GuildID, n.BotName, n.GuildName, n.Status, n.PingMs, n.ChannelCount, n.StorageBytes, n.CreatedAt, n.LastSeen, n.BotID, n.InviteURL)
 	return err
 }
@@ -1016,13 +1055,13 @@ func (d *Database) GetUniqueBotTokens() ([]string, error) {
 func (d *Database) DeleteBotNode(id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_, err := d.db.Exec(`DELETE FROM bot_nodes WHERE id = ?`, id)
+	_, err := d.db.Exec(`DELETE FROM bot_nodes WHERE id = $1`, id)
 	return err
 }
 
 func (d *Database) DeleteBotNodesByToken(botToken string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_, err := d.db.Exec(`DELETE FROM bot_nodes WHERE bot_token = ?`, botToken)
+	_, err := d.db.Exec(`DELETE FROM bot_nodes WHERE bot_token = $1`, botToken)
 	return err
 }

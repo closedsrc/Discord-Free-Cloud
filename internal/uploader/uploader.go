@@ -7,9 +7,11 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -140,6 +142,59 @@ type ServerTarget struct {
 	BotToken  string
 }
 
+func (e *Engine) settingInt(key string, fallback int) int {
+	v, err := e.db.GetSetting(key)
+	if err != nil || strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	if n, aerr := strconv.Atoi(strings.TrimSpace(v)); aerr == nil && n > 0 {
+		return n
+	}
+	return fallback
+}
+
+// poolDesired returns how many storage channels a server should keep ready.
+// The pool grows with stored bytes so no single channel/webhook accumulates
+// too much data before a fresh one is added.
+func (e *Engine) poolDesired(guildID string) int {
+	minPool := e.settingInt("pool_channels", 12)
+	if minPool < 4 {
+		minPool = 4
+	}
+	budget := e.settingInt("channel_byte_budget", 512*1024*1024)
+	stored := e.db.GuildStorageBytes(guildID)
+	want := minPool
+	if budget > 0 && stored > 0 {
+		if n := int(math.Ceil(float64(stored) / float64(budget))); n > want {
+			want = n
+		}
+	}
+	if want > discord.MaxPoolTarget {
+		want = discord.MaxPoolTarget
+	}
+	return want
+}
+
+// syncStoragePool syncs the guild's category-backed webhook pool up to
+// `desired` channels and mirrors every channel into the database.
+func (e *Engine) syncStoragePool(ctx context.Context, guildID, botToken string, desired int) ([]db.ChannelRecord, error) {
+	client := e.discord
+	if botToken != "" {
+		client = e.discord.CloneForToken(botToken)
+	}
+	items, err := client.SyncPool(ctx, guildID, desired)
+	if err != nil {
+		return nil, err
+	}
+	for _, it := range items {
+		if it.Channel.ID == "" || it.Webhook.URL == "" {
+			continue
+		}
+		_ = e.db.AddChannelFull(it.Channel.ID, it.Channel.Name, it.Webhook.URL, guildID, botToken, it.Channel.ParentID, false)
+	}
+	return e.db.GetStorageChannelsForGuild(guildID)
+}
+
 type partWorkItem struct {
 	chunk    db.ChunkRecord
 	webhook  string
@@ -229,23 +284,19 @@ func (e *Engine) UploadFile(ctx context.Context, localFilePath, virtualPath, par
 	var serverChannelSets []serverChannelSet
 
 	for _, t := range targets {
-		storageChannels, err := e.db.GetStorageChannelsForGuild(t.GuildID)
-		if err != nil || len(storageChannels) == 0 {
-			bToken := t.BotToken
-			if bToken == "" {
-				bToken = defaultBotToken
-			}
-			if t.GuildID != "" && bToken != "" {
-				res, setupErr := e.discord.SetupServerWithToken(ctx, bToken, t.GuildID)
-				if setupErr == nil && res != nil && len(res.StorageChannels) > 0 {
-					for _, ch := range res.StorageChannels {
-						_ = e.db.AddChannelWithGuild(ch.Channel.ID, ch.Channel.Name, ch.Webhook.URL, t.GuildID, bToken, false)
-					}
-					if res.MetadataChannel.ID != "" {
-						_ = e.db.AddChannelWithGuild(res.MetadataChannel.ID, res.MetadataChannel.Name, "", t.GuildID, bToken, true)
-					}
-					storageChannels, _ = e.db.GetStorageChannelsForGuild(t.GuildID)
-				}
+		bToken := t.BotToken
+		if bToken == "" {
+			bToken = defaultBotToken
+		}
+
+		storageChannels, _ := e.db.GetStorageChannelsForGuild(t.GuildID)
+		desired := e.poolDesired(t.GuildID)
+		if t.GuildID != "" && bToken != "" && len(storageChannels) < desired {
+			items, syncErr := e.syncStoragePool(ctx, t.GuildID, bToken, desired)
+			if syncErr == nil && len(items) > 0 {
+				storageChannels = items
+			} else {
+				storageChannels, _ = e.db.GetStorageChannelsForGuild(t.GuildID)
 			}
 		}
 
@@ -330,6 +381,13 @@ func (e *Engine) UploadFile(ctx context.Context, localFilePath, virtualPath, par
 			continue
 		}
 
+		// Start each file's round-robin at a random offset so uploads do not
+		// always land on the same webhook first.
+		rotStart := 0
+		if len(chList) > 1 {
+			rotStart = rand.Intn(len(chList))
+		}
+
 		for i := 0; i < totalChunks; i++ {
 			offset := int64(i * e.chunkSize)
 			cSize := e.chunkSize
@@ -337,7 +395,7 @@ func (e *Engine) UploadFile(ctx context.Context, localFilePath, virtualPath, par
 				cSize = int(fileSize - offset)
 			}
 
-			sh := chList[i%len(chList)]
+			sh := chList[(rotStart+i)%len(chList)]
 
 			chunkRec := &db.ChunkRecord{
 				ID:         uuid.New().String(),
@@ -430,7 +488,7 @@ func (e *Engine) runUpload(ctx context.Context, tracker *activeUpload, job *db.J
 	close(chunkChan)
 
 	var wg sync.WaitGroup
-	errChan := make(chan error, e.workerCount)
+	errChan := make(chan error, len(items)+1)
 	var completedCount int64 = int64(job.CompletedChunks)
 	atomic.StoreInt64(&tracker.processedBytes, completedCount*int64(e.chunkSize))
 
@@ -467,9 +525,10 @@ func (e *Engine) runUpload(ctx context.Context, tracker *activeUpload, job *db.J
 					n, err := f.ReadAt(chunkSlice, chunk.ByteOffset)
 					if err != nil && err != io.EOF && n == 0 {
 						atomic.AddInt32(&tracker.activeWorkers, -1)
+						_ = e.db.MarkChunkFailed(chunk.ID)
 						log.Printf("read failed at byte offset %d for %s: %v", chunk.ByteOffset, file.Name, err)
 						errChan <- fmt.Errorf("read error on part %d %w", chunk.ChunkIndex, err)
-						return
+						continue
 					}
 
 					actualChunkBytes := chunkSlice[:n]
@@ -477,8 +536,12 @@ func (e *Engine) runUpload(ctx context.Context, tracker *activeUpload, job *db.J
 
 					existingChunk, _ := e.db.FindChunkByHash(chunkHash)
 					if existingChunk != nil && existingChunk.AttachmentURL != "" {
-						_ = e.db.UpdateChunkStatus(chunk.ID, db.StatusCompleted, existingChunk.ChannelID, existingChunk.MessageID, existingChunk.AttachmentID, existingChunk.AttachmentURL)
-						_ = e.db.UpdateChunkHash(chunk.ID, chunkHash)
+						if uerr := e.db.UpdateChunkComplete(chunk.ID, item.guildID, existingChunk.ChannelID, existingChunk.MessageID, existingChunk.AttachmentID, existingChunk.AttachmentURL, chunkHash); uerr != nil {
+							atomic.AddInt32(&tracker.activeWorkers, -1)
+							_ = e.db.MarkChunkFailed(chunk.ID)
+							errChan <- fmt.Errorf("dedup write error on part %d %w", chunk.ChunkIndex, uerr)
+							continue
+						}
 						_ = e.db.IncrementJobCompletedChunks(job.ID)
 
 						curDone := atomic.AddInt64(&completedCount, 1)
@@ -506,9 +569,10 @@ func (e *Engine) runUpload(ctx context.Context, tracker *activeUpload, job *db.J
 					encryptedPayload, err := crypto.EncryptChunk(actualChunkBytes, key, aad)
 					if err != nil {
 						atomic.AddInt32(&tracker.activeWorkers, -1)
+						_ = e.db.MarkChunkFailed(chunk.ID)
 						log.Printf("encryption error on part %d: %v", chunk.ChunkIndex, err)
 						errChan <- fmt.Errorf("lock error on part %d %w", chunk.ChunkIndex, err)
-						return
+						continue
 					}
 
 					pngWrapped := crypto.WrapPNG(encryptedPayload)
@@ -540,8 +604,13 @@ func (e *Engine) runUpload(ctx context.Context, tracker *activeUpload, job *db.J
 						return
 					}
 
-					_ = e.db.UpdateChunkWithGuild(chunk.ID, db.StatusCompleted, item.guildID, res.ChannelID, res.MessageID, res.AttachmentID, res.AttachmentURL)
-					_ = e.db.UpdateChunkHash(chunk.ID, chunkHash)
+					if cerr := e.db.UpdateChunkComplete(chunk.ID, item.guildID, res.ChannelID, res.MessageID, res.AttachmentID, res.AttachmentURL, chunkHash); cerr != nil {
+						atomic.AddInt32(&tracker.activeWorkers, -1)
+						_ = e.db.MarkChunkFailed(chunk.ID)
+						log.Printf("completion write failed for part %d: %v", chunk.ChunkIndex, cerr)
+						errChan <- fmt.Errorf("completion write error on part %d %w", chunk.ChunkIndex, cerr)
+						continue
+					}
 					_ = e.db.IncrementJobCompletedChunks(job.ID)
 
 					curDone := atomic.AddInt64(&completedCount, 1)
@@ -620,15 +689,28 @@ func (e *Engine) runUpload(ctx context.Context, tracker *activeUpload, job *db.J
 	wg.Wait()
 	close(errChan)
 
-	if err, ok := <-errChan; ok && err != nil {
+	var uploadErr error
+	for err := range errChan {
+		if uploadErr == nil {
+			uploadErr = err
+		}
+	}
+
+	// Verify the DB agrees that every chunk copy reached COMPLETED before
+	// declaring success, so a partial replication is never reported as done.
+	completedCopies, _ := e.db.CountCompletedChunksForJob(job.ID)
+	if uploadErr != nil || completedCopies < job.TotalChunks {
+		if uploadErr == nil {
+			uploadErr = fmt.Errorf("incomplete replication: %d/%d parts stored", completedCopies, job.TotalChunks)
+		}
 		_ = e.db.UpdateJobStatus(job.ID, db.JobStatusFailed)
-		log.Printf("job %s failed: %v", job.ID, err)
+		log.Printf("job %s failed: %v (%d/%d copies completed)", job.ID, uploadErr, completedCopies, job.TotalChunks)
 		e.broadcast(TelemetryEvent{
 			JobID:      job.ID,
 			FileID:     file.ID,
 			Status:     db.JobStatusFailed,
-			Error:      err.Error(),
-			LogMessage: fmt.Sprintf("Upload stopped: %v", err),
+			Error:      uploadErr.Error(),
+			LogMessage: fmt.Sprintf("Upload stopped: %v", uploadErr),
 		})
 		return
 	}

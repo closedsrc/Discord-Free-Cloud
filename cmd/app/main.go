@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/hex"
 	"flag"
@@ -11,9 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -24,70 +21,33 @@ import (
 	"discord-free-cloud/internal/discord"
 	"discord-free-cloud/internal/downloader"
 	"discord-free-cloud/internal/server"
-	"discord-free-cloud/internal/syswin"
 	"discord-free-cloud/internal/uploader"
-
-	"golang.org/x/sys/windows"
 )
-
-func isConsole(fd uintptr) bool {
-	var mode uint32
-	return windows.GetConsoleMode(windows.Handle(fd), &mode) == nil
-}
-
-func readPasswordConsole(prompt string) (string, error) {
-	fmt.Print(prompt)
-	hStdin := windows.Handle(os.Stdin.Fd())
-	var oldMode uint32
-	if err := windows.GetConsoleMode(hStdin, &oldMode); err == nil {
-		newMode := oldMode &^ windows.ENABLE_ECHO_INPUT
-		if err := windows.SetConsoleMode(hStdin, newMode); err == nil {
-			defer func() {
-				_ = windows.SetConsoleMode(hStdin, oldMode)
-				fmt.Println()
-			}()
-		}
-	}
-
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
 
 func main() {
 	portFlag := flag.Int("port", 8080, "web server port")
-	dbPathFlag := flag.String("db", "", "path to storage database file")
+	dbURLFlag := flag.String("db-url", "", "PostgreSQL connection string (env DATABASE_URL is used when empty)")
 	noBrowserFlag := flag.Bool("no-browser", false, "skip opening browser")
-	noPromptFlag := flag.Bool("no-prompt", false, "skip console password prompt")
-	passwordFlag := flag.String("password", "", "master password flag")
+	passwordFlag := flag.String("password", "", "master password flag (env MASTER_PASSWORD is used when empty)")
 	chunkSizeFlag := flag.Int("chunk-size", 8*1024*1024, "part size in bytes")
 	workersFlag := flag.Int("workers", 6, "upload worker count")
 	flag.Parse()
 
-	dbPath := *dbPathFlag
-	if dbPath == "" {
-		appData := os.Getenv("APPDATA")
-		if appData != "" {
-			dbPath = filepath.Join(appData, "DiscordFreeCloud", "drive.db")
-			oldPath := filepath.Join(appData, "DiscordStorageEngine", "drive.db")
-			if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-				if _, err := os.Stat(oldPath); err == nil {
-					_ = os.MkdirAll(filepath.Dir(dbPath), 0755)
-					_ = os.Rename(oldPath, dbPath)
-				}
-			}
-		} else {
-			dbPath = filepath.Join("data", "drive.db")
-		}
+	// Retained so scripts that pass -no-browser keep working on headless hosts.
+	_ = noBrowserFlag
+
+	dbURL := *dbURLFlag
+	if dbURL == "" {
+		dbURL = os.Getenv("DATABASE_URL")
+	}
+	if dbURL == "" {
+		log.Fatal("no database configured: pass -db-url or set DATABASE_URL")
 	}
 
 	fmt.Println("Discord Free Cloud by zyrexdz")
-	fmt.Printf("Database: %s\n", dbPath)
+	fmt.Println("Database: PostgreSQL (configured via -db-url / DATABASE_URL)")
 
-	database, err := db.InitDB(dbPath)
+	database, err := db.InitDB(dbURL)
 	if err != nil {
 		log.Fatalf("could not start database: %v", err)
 	}
@@ -120,14 +80,19 @@ func main() {
 		salt, _ = hex.DecodeString(saltHex)
 	}
 
+	masterPassword := *passwordFlag
+	if masterPassword == "" {
+		masterPassword = os.Getenv("MASTER_PASSWORD")
+	}
+
 	var masterKey []byte
 
-	if *passwordFlag != "" {
+	if masterPassword != "" {
 		if len(salt) == 0 {
 			salt, _ = crypto.GenerateSalt()
 			_ = database.SetSetting("master_salt_hex", hex.EncodeToString(salt))
 		}
-		key := crypto.DeriveKey(*passwordFlag, salt)
+		key := crypto.DeriveKey(masterPassword, salt)
 		computedHash := crypto.ComputeSHA256(key)
 		if passHash != "" && passHash != computedHash {
 			log.Fatalf("incorrect encryption password")
@@ -137,40 +102,8 @@ func main() {
 		}
 		masterKey = key
 		fmt.Println("Password verified. Drive unlocked.")
-	} else if !*noPromptFlag && isConsole(os.Stdin.Fd()) {
-		if passHash != "" {
-			for attempts := 1; attempts <= 3; attempts++ {
-				pass, err := readPasswordConsole(fmt.Sprintf("Enter password (attempt %d/3): ", attempts))
-				if err != nil || pass == "" {
-					fmt.Println("No password entered. Drive locked.")
-					break
-				}
-				key := crypto.DeriveKey(pass, salt)
-				if crypto.ComputeSHA256(key) == passHash {
-					masterKey = key
-					fmt.Println("Password accepted. Drive unlocked.")
-					break
-				}
-				fmt.Println("Incorrect password, please try again.")
-			}
-		} else {
-			fmt.Println("Set an encryption password for your storage:")
-			pass1, err1 := readPasswordConsole("Password: ")
-			if err1 == nil && pass1 != "" {
-				pass2, err2 := readPasswordConsole("Confirm password: ")
-				if err2 == nil && pass1 == pass2 {
-					salt, _ = crypto.GenerateSalt()
-					masterKey = crypto.DeriveKey(pass1, salt)
-					_ = database.SetSetting("master_salt_hex", hex.EncodeToString(salt))
-					_ = database.SetSetting("master_pass_hash", crypto.ComputeSHA256(masterKey))
-					fmt.Println("Password saved. Drive unlocked.")
-				} else {
-					fmt.Println("Passwords did not match. Set password in browser.")
-				}
-			} else {
-				fmt.Println("Skipped. Set password in browser.")
-			}
-		}
+	} else {
+		fmt.Println("No password flag provided. Drive starts locked; set a password in the browser.")
 	}
 
 	discordClient := discord.NewClient(botToken)
@@ -221,12 +154,29 @@ func main() {
 		}
 	}()
 
-	if !*noBrowserFlag {
-		go func() {
-			time.Sleep(400 * time.Millisecond)
-			_ = syswin.OpenBrowser(serverURL)
-		}()
+	// Provision on boot: seed config from env (falls back to stored settings),
+	// register the bot's servers, and make sure storage pools exist.
+	bootToken := os.Getenv("BOT_TOKEN")
+	bootGuild := os.Getenv("PRIMARY_GUILD_ID")
+	bootCategory := os.Getenv("BASE_CATEGORY_ID")
+	if bootToken == "" {
+		bootToken = settings["bot_token"]
 	}
+	if bootGuild == "" {
+		bootGuild = settings["guild_id"]
+	}
+	if bootCategory == "" {
+		bootCategory = settings["base_category_id"]
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if err := srv.Provision(ctx, bootToken, bootGuild, bootCategory); err != nil {
+			log.Printf("startup provisioning failed: %v", err)
+		} else {
+			log.Printf("startup provisioning complete")
+		}
+	}()
 
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)

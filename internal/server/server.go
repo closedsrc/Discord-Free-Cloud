@@ -45,6 +45,8 @@ type Server struct {
 
 	wsMu      sync.Mutex
 	wsClients map[*websocket.Conn]bool
+
+	syncMu sync.Mutex // serializes server/node syncing + provisioning
 }
 
 func NewServer(database *db.Database, discordClient *discord.Client, upEngine *uploader.Engine, downEngine *downloader.Engine, catManager *catalog.Manager, frontend fs.FS) *Server {
@@ -87,7 +89,7 @@ func NewServer(database *db.Database, discordClient *discord.Client, upEngine *u
 	}()
 
 	go func() {
-		ticker := time.NewTicker(3 * time.Second)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
 			_, _ = s.syncAllBotGuilds(context.Background())
@@ -1256,6 +1258,9 @@ func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) syncAllBotGuilds(ctx context.Context) (int, error) {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+
 	tokens, _ := s.db.GetUniqueBotTokens()
 	mainToken, _ := s.db.GetSetting("bot_token")
 	if mainToken != "" {
@@ -1334,12 +1339,12 @@ func (s *Server) syncAllBotGuilds(ctx context.Context) (int, error) {
 
 			channels, _ := s.db.GetChannelsByGuild(g.ID)
 			if len(channels) == 0 {
-				client := discord.NewClient(token)
+				client := s.discord.CloneForToken(token)
 				res, err := client.SetupServer(ctx, g.ID)
 				if err == nil && res != nil {
 					for _, ch := range res.StorageChannels {
 						if ch.Channel.ID != "" && ch.Webhook.URL != "" {
-							_ = s.db.AddChannelWithGuild(ch.Channel.ID, ch.Channel.Name, ch.Webhook.URL, g.ID, token, false)
+							_ = s.db.AddChannelFull(ch.Channel.ID, ch.Channel.Name, ch.Webhook.URL, g.ID, token, ch.Channel.ParentID, false)
 						}
 					}
 					if res.MetadataChannel.ID != "" {
@@ -1384,6 +1389,31 @@ func (s *Server) syncAllBotGuilds(ctx context.Context) (int, error) {
 	}
 
 	return newDetected, nil
+}
+
+// Provision seeds core configuration (bot token, primary server and its base
+// storage category), registers every server the bot can reach as a replication
+// target, and provisions the initial storage pools. Safe to call on every
+// boot; it never duplicates channels that already exist.
+func (s *Server) Provision(ctx context.Context, botToken, primaryGuildID, baseCategoryID string) error {
+	if botToken != "" {
+		_ = s.db.SetSetting("bot_token", botToken)
+		s.discord.SetBotToken(botToken)
+		s.discord.SetPoolPrefix("files")
+	}
+	if primaryGuildID != "" {
+		_ = s.db.SetSetting("guild_id", primaryGuildID)
+	}
+	if baseCategoryID != "" {
+		_ = s.db.SetSetting("base_category_id", baseCategoryID)
+		if primaryGuildID != "" {
+			s.discord.SetBaseCategory(primaryGuildID, baseCategoryID)
+		}
+	}
+	if _, err := s.syncAllBotGuilds(ctx); err != nil {
+		return fmt.Errorf("server sync failed: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) handleBots(w http.ResponseWriter, r *http.Request) {
