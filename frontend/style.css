@@ -188,7 +188,7 @@ svg{display:block;flex:none}
 .c-menu{width:52px;padding-right:16px!important}
 .th-sort{cursor:pointer;user-select:none}
 .th-sort:hover{color:var(--text-2)}
-.sort-arrow{display:inline-block;width:12px;margin-left:5px;font-size:10px;color:var(--text-3);vertical-align:1px}
+.sort-arrow{display:inline-block;margin-left:5px;font-size:10px;color:var(--text-3);vertical-align:1px}
 .th-sort.asc .sort-arrow::after{content:"↑"}
 .th-sort.desc .sort-arrow::after{content:"↓"}
 .ftable tbody td{padding:0;border:0;height:var(--row);vertical-align:middle}
@@ -623,13 +623,15 @@ svg{display:block;flex:none}
 @media (max-width:960px){
     .rail{display:none}
     /* the rail's destinations move into the drawer, which is the only nav there */
-    .rail-only{display:flex}
-    .nav-sep.rail-only{display:block;height:1px;background:var(--line);margin:7px 10px}
+    .sb-nav .rail-only{display:flex}
+    .sb-nav .nav-sep.rail-only{display:block;height:1px;background:var(--line);margin:7px 10px}
     .sidebar{
         position:fixed;top:0;left:0;bottom:0;z-index:120;transform:translateX(-100%);
-        transition:transform .22s ease;box-shadow:0 0 40px rgba(0,0,0,.6);
+        transition:transform .22s ease;
     }
-    body.nav-open .sidebar{transform:none}
+    /* only cast the shadow while the drawer is out, otherwise an off-canvas
+       panel bleeds a dark band down the left of the page */
+    body.nav-open .sidebar{transform:none;box-shadow:0 0 40px rgba(0,0,0,.6)}
     body.nav-open .sidebar-scrim{display:block;position:fixed;inset:0;z-index:110;background:rgba(0,0,0,.5)}
     .menu-btn{display:grid}
     .topbar{padding-left:14px}
@@ -650,7 +652,8 @@ svg{display:block;flex:none}
     .fr-name{padding-left:14px}
     .ftable thead th.c-name{padding-left:14px}
     .ftable thead th{font-size:12px}
-    .c-size,.fr-size{text-align:right;padding-right:14px}
+    /* header must beat `.ftable thead th{text-align:left}` to sit over its values */
+    .ftable thead th.c-size,.fr-size{text-align:right;padding-right:14px}
     .c-menu,.fr-menu{padding-right:6px}
     .files-grid{grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:11px;padding:14px}
     .card,.infra-list,#links-panel,#transfers-list{margin-left:14px;margin-right:14px;padding-left:0;padding-right:0}

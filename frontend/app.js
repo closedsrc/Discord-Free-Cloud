@@ -1153,14 +1153,13 @@ async function loadServers() {
     box.innerHTML = S.servers.map(s => {
         const name = s.guild_name || s.guild_id || 'Server';
         const av = avatarFor(name);
-        const ok = /^active$/i.test(s.status || '');
-        const state = s.status
-            ? `<span class="st ${ok ? 'ok' : 'processing'}">${esc(s.status)}</span>`
-            : '<span class="st">unknown</span>';
+        // plain words, not an .st chip: `.st.ok` is display:none by design so a
+        // healthy file shows no badge, which would silently blank this line
+        const state = String(s.status || 'unknown').toLowerCase();
         return `<div class="server-card">
         <span class="bc-avatar" style="background:${av.hue}">${esc(av.letter)}</span>
         <div class="bc-main"><div class="bc-name">${esc(name)}</div>
-        <div class="bc-sub">${s.channel_count || 0} storage channels · shards ${state}</div></div>
+        <div class="bc-sub">${s.channel_count || 0} storage channels · shards ${esc(state)}</div></div>
         <div class="bc-stats"><span>${fmtBytes(s.storage_bytes || 0)}</span></div></div>`;
     }).join('');
     populateTargets();

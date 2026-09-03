@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -179,12 +180,26 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) http.Handler {
 	} else {
 		fileHandler = http.FileServer(http.FS(s.frontendFS))
 	}
-	mux.Handle("/", fileHandler)
+	mux.Handle("/", noStoreShell(fileHandler))
 
 	// The auth middleware is applied here rather than in main so every caller
 	// of RegisterRoutes gets a guarded handler: no API tokens seeded means it
 	// is a transparent pass-through (first-run dashboard unchanged).
 	return s.requireAuth(mux)
+}
+
+// noStoreShell keeps the dashboard shell out of caches. The panel is published
+// through a Cloudflare tunnel, which caches .css/.js by default and may ignore
+// the ?v= buster — without this a deploy stays invisible for hours.
+func noStoreShell(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch strings.ToLower(path.Ext(r.URL.Path)) {
+		case "", ".html", ".css", ".js", ".json":
+			w.Header().Set("Cache-Control", "no-store, must-revalidate")
+			w.Header().Set("Pragma", "no-cache")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
