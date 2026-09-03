@@ -61,6 +61,7 @@ func NewServer(database *db.Database, discordClient *discord.Client, upEngine *u
 		catalog:    catManager,
 		frontendFS: frontend,
 		wsClients:  make(map[*websocket.Conn]bool),
+		sessions:   make(map[string]time.Time),
 	}
 
 	telemetryHandler := func(event uploader.TelemetryEvent) {

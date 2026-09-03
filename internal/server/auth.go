@@ -260,6 +260,9 @@ func (s *Server) issueSession() (string, error) {
 
 	s.sessMu.Lock()
 	defer s.sessMu.Unlock()
+	if s.sessions == nil { // constructed without NewServer; never panic on unlock
+		s.sessions = make(map[string]time.Time)
+	}
 	s.sessions[id] = time.Now().Add(sessionLifetime)
 	s.pruneSessionsLocked()
 	return token, nil
