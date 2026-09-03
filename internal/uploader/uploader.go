@@ -113,6 +113,15 @@ func (e *Engine) SetMasterKey(key []byte) {
 	e.masterKey = key
 }
 
+// IsJobActive reports whether a job still has a running worker pool. Upload
+// handlers use it to know when a staged temp file can be removed.
+func (e *Engine) IsJobActive(jobID string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	_, ok := e.activeJobs[jobID]
+	return ok
+}
+
 func (e *Engine) HasMasterKey() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -228,9 +237,18 @@ func (e *Engine) UploadFile(ctx context.Context, localFilePath, virtualPath, par
 		totalChunks = 1
 	}
 
-	fileName := filepath.Base(localFilePath)
-	if virtualPath == "" {
+	// The display name must come from the virtual path, not the (randomly named)
+	// staging temp file. Callers that pass no virtual path fall back to the
+	// local basename as before.
+	var fileName string
+	if virtualPath != "" {
+		fileName = filepath.Base(filepath.ToSlash(virtualPath))
+	} else {
+		fileName = filepath.Base(localFilePath)
 		virtualPath = "/" + fileName
+	}
+	if fileName == "" || fileName == "." || fileName == "/" {
+		fileName = filepath.Base(localFilePath)
 	}
 
 	var targets []ServerTarget

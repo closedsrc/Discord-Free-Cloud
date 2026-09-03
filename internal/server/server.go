@@ -163,6 +163,15 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) http.Handler {
 	mux.HandleFunc("/api/shares/revoke", s.handleShareRevoke)
 	mux.HandleFunc("/api/share/", s.handleSharePublic)
 	mux.HandleFunc("/api/verify", s.handleVerifyFile)
+	mux.HandleFunc("/api/files/rename", s.handleFileRename)
+	mux.HandleFunc("/api/files/move", s.handleFileMove)
+	mux.HandleFunc("/api/files/favorite", s.handleFileFavorite)
+	mux.HandleFunc("/api/files/trash", s.handleFileTrash)
+	mux.HandleFunc("/api/files/restore", s.handleFileRestore)
+	mux.HandleFunc("/api/files/details", s.handleFileDetails)
+	mux.HandleFunc("/api/files/raw_chunk", s.handleFileRawChunk)
+	mux.HandleFunc("/api/files/batch", s.handleFilesBatch)
+	mux.HandleFunc("/api/files/view", s.handleFilesView)
 
 	var fileHandler http.Handler
 	if _, err := os.Stat(filepath.Join("frontend", "index.html")); err == nil {
@@ -636,15 +645,9 @@ func (s *Server) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
 		"parent_id": req.ParentID,
 	})
 
-	guildID, _ := s.db.GetSetting("guild_id")
-	if guildID != "" {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			_, _ = s.discord.FindOrCreateCategory(ctx, guildID, dirRec.Name)
-		}()
-	}
-
+	// DFC folders are virtual catalog entries only. They must never create
+	// Discord-side categories: the Discord layout is storage plumbing (the
+	// configured storage pool), not a mirror of the drive tree.
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"folder": dirRec,
@@ -679,21 +682,30 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 		defer file.Close()
 
+		// The client-supplied filename must never touch the local filesystem
+		// directly (traversal/collision). Stage the bytes under a random name
+		// and keep only the display name for the virtual path.
+		safeName := filepath.Base(strings.ReplaceAll(header.Filename, "\\", "/"))
+		if safeName == "" || safeName == "." || safeName == ".." {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "Invalid file name"})
+			return
+		}
+
 		tempDir := filepath.Join(os.TempDir(), "discord-free-cloud")
 		_ = os.MkdirAll(tempDir, 0755)
-		tempPath := filepath.Join(tempDir, header.Filename)
-
-		dst, err := os.Create(tempPath)
+		tempFile, err := os.CreateTemp(tempDir, "upload-*")
 		if err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "Could not create temporary file: " + err.Error()})
 			return
 		}
-		if _, err := io.Copy(dst, file); err != nil {
-			dst.Close()
+		tempPath := tempFile.Name()
+		if _, err := io.Copy(tempFile, file); err != nil {
+			tempFile.Close()
+			_ = os.Remove(tempPath)
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "Copy error: " + err.Error()})
 			return
 		}
-		dst.Close()
+		tempFile.Close()
 
 		parentID := r.FormValue("parent_id")
 		targetGuildID := r.FormValue("target_guild_id")
@@ -705,15 +717,24 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 				parentPath = parentRec.Path
 			}
 		}
-		virtualPath := filepath.ToSlash(filepath.Join(parentPath, header.Filename))
+		virtualPath := filepath.ToSlash(filepath.Join(parentPath, safeName))
 
 		jobID, err := s.uploader.UploadFile(context.Background(), tempPath, virtualPath, parentID, targetGuildID)
 		if err != nil {
+			_ = os.Remove(tempPath)
 			jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		// The upload engine streams the staged file in a background goroutine;
+		// it removes the staging copy when the job finishes.
+		go func(id, path string) {
+			for s.uploader.IsJobActive(id) {
+				time.Sleep(2 * time.Second)
+			}
+			_ = os.Remove(path)
+		}(jobID, tempPath)
 
-		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "job_id": jobID, "status": "started"})
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "job_id": jobID, "file_name": safeName, "parent_id": parentID, "status": "started"})
 		return
 	}
 
@@ -967,19 +988,27 @@ func (s *Server) handleCreateTextFile(w http.ResponseWriter, r *http.Request) {
 	if targetName == "" {
 		targetName = strings.TrimSpace(req.Filename)
 	}
-	if targetName == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "File name is required"})
+	targetName = filepath.Base(strings.ReplaceAll(targetName, "\\", "/"))
+	if targetName == "" || targetName == "." || targetName == ".." {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "Invalid file name"})
 		return
 	}
 
 	tempDir := filepath.Join(os.TempDir(), "discord-free-cloud")
 	_ = os.MkdirAll(tempDir, 0755)
-	tempPath := filepath.Join(tempDir, targetName)
-
-	if err := os.WriteFile(tempPath, []byte(req.Content), 0644); err != nil {
+	tempFile, err := os.CreateTemp(tempDir, "text-*")
+	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	tempPath := tempFile.Name()
+	if _, err := tempFile.WriteString(req.Content); err != nil {
+		tempFile.Close()
+		_ = os.Remove(tempPath)
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	tempFile.Close()
 
 	parentPath := ""
 	if req.ParentID != "" {
@@ -992,11 +1021,18 @@ func (s *Server) handleCreateTextFile(w http.ResponseWriter, r *http.Request) {
 
 	jobID, err := s.uploader.UploadFile(context.Background(), tempPath, virtualPath, req.ParentID)
 	if err != nil {
+		_ = os.Remove(tempPath)
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	go func(id, path string) {
+		for s.uploader.IsJobActive(id) {
+			time.Sleep(2 * time.Second)
+		}
+		_ = os.Remove(path)
+	}(jobID, tempPath)
 
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "job_id": jobID, "name": targetName, "status": "started"})
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "job_id": jobID, "name": targetName, "parent_id": req.ParentID, "status": "started"})
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
@@ -1078,6 +1114,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	for _, dt := range deleteTargets {
 		_ = s.db.DeleteFile(dt.fileRec.ID)
 		deletedCount++
+		_ = s.db.DeleteSharesForFile(dt.fileRec.ID)
 	}
 
 	s.broadcastJSON(map[string]any{
@@ -1494,7 +1531,7 @@ func (s *Server) handleBots(w http.ResponseWriter, r *http.Request) {
 		ID           string   `json:"id"`
 		BotID        string   `json:"bot_id"`
 		BotName      string   `json:"bot_name"`
-		BotToken     string   `json:"bot_token"`
+		BotToken     string   `json:"bot_token,omitempty"`
 		Status       string   `json:"status"`
 		PingMs       int64    `json:"ping_ms"`
 		ChannelCount int      `json:"channel_count"`
@@ -1524,7 +1561,7 @@ func (s *Server) handleBots(w http.ResponseWriter, r *http.Request) {
 				ID:           n.ID,
 				BotID:        n.BotID,
 				BotName:      n.BotName,
-				BotToken:     n.BotToken,
+				BotToken:     "",
 				Status:       n.Status,
 				PingMs:       n.PingMs,
 				ChannelCount: n.ChannelCount,
@@ -2111,6 +2148,17 @@ func (s *Server) handleAuthSetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Password == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "Password cannot be empty"})
+		return
+	}
+
+	// Replacing the master password re-derives the drive key. If a password is
+	// already configured, require an existing browser session or a write-scope
+	// token so a random network request can never silently rotate a live drive.
+	existingHash, _ := s.db.GetSetting("master_pass_hash")
+	replacingExisting := existingHash != ""
+	authorized := s.sessionValid(r) || s.classify(tokenFromRequest(r)) == scopeWrite
+	if replacingExisting && !authorized {
+		jsonError(w, http.StatusForbidden, "existing password rotation requires a browser session or write token")
 		return
 	}
 

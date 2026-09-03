@@ -99,18 +99,21 @@ func (s *Server) classify(token string) tokenScope {
 // not in publicRoutes requires a write token. Shares are capabilities that
 // carry their own token in the path, so /api/share/<token> never appears here.
 var readOnlyRoutes = map[string]bool{
-	"/api/status":         true,
-	"/api/stats":          true,
-	"/api/files":          true,
-	"/api/download":       true,
-	"/api/download/file":  true,
-	"/api/download/check": true,
-	"/api/jobs":           true,
-	"/api/channels":       true,
-	"/api/servers":        true,
-	"/api/verify":         true,
-	"/api/shares/list":    true,
-	"/api/auth/status":    true,
+	"/api/status":          true,
+	"/api/stats":           true,
+	"/api/files":           true,
+	"/api/download":        true,
+	"/api/download/file":   true,
+	"/api/download/check":  true,
+	"/api/jobs":            true,
+	"/api/channels":        true,
+	"/api/servers":         true,
+	"/api/verify":          true,
+	"/api/files/view":      true,
+	"/api/files/details":   true,
+	"/api/files/raw_chunk": true,
+	"/api/shares/list":     true,
+	"/api/auth/status":     true,
 }
 
 // publicRoutes stay unauthenticated: the unlock dance, health probes and share

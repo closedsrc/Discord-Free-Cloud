@@ -54,6 +54,8 @@ type FileRecord struct {
 	SHA256    string `json:"sha256"`
 	MimeType  string `json:"mime_type"`
 	CreatedAt int64  `json:"created_at"`
+	Favorite  bool   `json:"favorite"`
+	TrashedAt *int64 `json:"trashed_at,omitempty"`
 }
 
 type JobRecord struct {
@@ -247,6 +249,9 @@ func (d *Database) migrate() error {
 
 	_, _ = d.db.Exec("UPDATE settings SET value = '7864320' WHERE key = 'chunk_size_bytes' AND (value = '20971520' OR value = '20000000' OR value = '')")
 	_, _ = d.db.Exec("UPDATE files SET parent_id = '' WHERE parent_id != '' AND parent_id NOT IN (SELECT id FROM files WHERE is_dir = 1)")
+	if err := d.MigrateQOL(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -476,13 +481,19 @@ func (d *Database) GetFile(id string) (*FileRecord, error) {
 	defer d.mu.RUnlock()
 
 	var f FileRecord
-	var isDirInt int
-	err := d.db.QueryRow(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE id = $1`, id).
-		Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt)
+	var isDirInt, favInt int
+	var trashed sql.NullInt64
+	err := d.db.QueryRow(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at, favorite, trashed_at FROM files WHERE id = $1`, id).
+		Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt, &favInt, &trashed)
 	if err != nil {
 		return nil, err
 	}
 	f.IsDir = (isDirInt == 1)
+	f.Favorite = (favInt == 1)
+	if trashed.Valid {
+		v := trashed.Int64
+		f.TrashedAt = &v
+	}
 	return &f, nil
 }
 
@@ -491,13 +502,19 @@ func (d *Database) GetFileByPath(path string) (*FileRecord, error) {
 	defer d.mu.RUnlock()
 
 	var f FileRecord
-	var isDirInt int
-	err := d.db.QueryRow(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE path = $1`, path).
-		Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt)
+	var isDirInt, favInt int
+	var trashed sql.NullInt64
+	err := d.db.QueryRow(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at, favorite, trashed_at FROM files WHERE path = $1`, path).
+		Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt, &favInt, &trashed)
 	if err != nil {
 		return nil, err
 	}
 	f.IsDir = (isDirInt == 1)
+	f.Favorite = (favInt == 1)
+	if trashed.Valid {
+		v := trashed.Int64
+		f.TrashedAt = &v
+	}
 	return &f, nil
 }
 
@@ -508,9 +525,9 @@ func (d *Database) ListFiles(parentID string) ([]FileRecord, error) {
 	var query string
 	var args []any
 	if parentID == "" {
-		query = `SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE parent_id = '' OR parent_id IS NULL OR parent_id NOT IN (SELECT id FROM files WHERE is_dir = 1) ORDER BY is_dir DESC, name ASC`
+		query = `SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at, favorite, trashed_at FROM files WHERE parent_id = '' OR parent_id IS NULL OR parent_id NOT IN (SELECT id FROM files WHERE is_dir = 1) AND trashed_at IS NULL ORDER BY is_dir DESC, name ASC`
 	} else {
-		query = `SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files WHERE parent_id = $1 ORDER BY is_dir DESC, name ASC`
+		query = `SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at, favorite, trashed_at FROM files WHERE parent_id = $1 AND trashed_at IS NULL ORDER BY is_dir DESC, name ASC`
 		args = append(args, parentID)
 	}
 
@@ -523,11 +540,17 @@ func (d *Database) ListFiles(parentID string) ([]FileRecord, error) {
 	var list []FileRecord
 	for rows.Next() {
 		var f FileRecord
-		var isDirInt int
-		if err := rows.Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt); err != nil {
+		var isDirInt, favInt int
+		var trashed sql.NullInt64
+		if err := rows.Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt, &favInt, &trashed); err != nil {
 			return nil, err
 		}
 		f.IsDir = (isDirInt == 1)
+		f.Favorite = (favInt == 1)
+		if trashed.Valid {
+			v := trashed.Int64
+			f.TrashedAt = &v
+		}
 		list = append(list, f)
 	}
 	return list, nil
@@ -537,7 +560,7 @@ func (d *Database) GetAllFiles() ([]FileRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	rows, err := d.db.Query(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at FROM files ORDER BY path ASC`)
+	rows, err := d.db.Query(`SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at, favorite, trashed_at FROM files ORDER BY path ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -546,11 +569,17 @@ func (d *Database) GetAllFiles() ([]FileRecord, error) {
 	var list []FileRecord
 	for rows.Next() {
 		var f FileRecord
-		var isDirInt int
-		if err := rows.Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt); err != nil {
+		var isDirInt, favInt int
+		var trashed sql.NullInt64
+		if err := rows.Scan(&f.ID, &f.ParentID, &f.Name, &f.Path, &f.Size, &isDirInt, &f.ModTime, &f.SHA256, &f.MimeType, &f.CreatedAt, &favInt, &trashed); err != nil {
 			return nil, err
 		}
 		f.IsDir = (isDirInt == 1)
+		f.Favorite = (favInt == 1)
+		if trashed.Valid {
+			v := trashed.Int64
+			f.TrashedAt = &v
+		}
 		list = append(list, f)
 	}
 	return list, nil
