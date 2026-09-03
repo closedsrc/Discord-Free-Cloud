@@ -29,9 +29,13 @@ const fmtBytes = n => {
     if (!isFinite(n)) return '--';
     const u = ['B','KB','MB','GB','TB']; let i = 0; n = Number(n);
     while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-    return (i ? n.toFixed(n >= 100 ? 0 : 1) : n) + ' ' + u[i];
+    return (i ? parseFloat(n.toFixed(2)) : Math.round(n)) + ' ' + u[i];
 };
-const fmtDate = ts => { try { return new Date(ts * 1000).toLocaleString([], { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }); } catch(e) { return '--'; } };
+const fmtDate = ts => {
+    try { const d = new Date(ts * 1000); return d.toDateString() + ' ' + d.toLocaleTimeString('en-GB'); }
+    catch (e) { return '--'; }
+};
+const fmtDateShort = ts => { try { return new Date(ts * 1000).toDateString().slice(4); } catch (e) { return '--'; } };
 const extOf = name => { const m = /\.([a-z0-9]+)$/i.exec(name || ''); return m ? m[1].toLowerCase() : ''; };
 
 const IMAGE_EXT = new Set(['jpg','jpeg','png','gif','webp','bmp','ico','avif','svg','tiff']);
@@ -57,7 +61,7 @@ const S = {
     trail: [],                  // breadcrumb path [{id,name}]
     files: [], trash: [],
     filter: 'all', sortKey: 'name', sortDir: 'asc',
-    layout: localStorage.getItem('dfc_layout') || 'grid',
+    layout: localStorage.getItem('dfc_layout') || 'list',
     selected: new Set(),
     status: null, bots: [], servers: [],
     lastUploadFolder: '',
@@ -231,7 +235,8 @@ function navigateInto(folder) {
         switchView('drive');
         return;
     }
-    S.trail.push({ id: S.parentID, name: S.parentName || 'Cloud Drive' });
+    if (folder.id === S.parentID) return;
+    if (S.parentID) S.trail.push({ id: S.parentID, name: S.parentName });
     S.parentID = folder.id; S.parentName = folder.name;
     reloadCurrent(); renderBreadcrumb();
 }
@@ -242,7 +247,8 @@ function openFolderDirect(folder) {
 function navigateUp() { const p = S.trail.pop(); S.parentID = p ? p.id : ''; S.parentName = p ? p.name : ''; reloadCurrent(); renderBreadcrumb(); }
 function renderBreadcrumb() {
     const bar = $('breadcrumb-bar'); bar.innerHTML = '';
-    if (S.view !== 'drive') return;
+    if (S.view === 'drive') $('page-title').textContent = S.parentID ? S.parentName : 'Cloud Drive';
+    if (S.view !== 'drive' || !S.parentID) return;
     const crumb = (label, fn, isLast) => {
         const b = document.createElement(isLast ? 'span' : 'button');
         b.className = 'crumb' + (isLast ? ' cur' : ''); if (!isLast) b.type = 'button';
@@ -336,9 +342,9 @@ const thumbObserver = new IntersectionObserver(entries => {
     }
 }, { rootMargin: '200px' });
 function thumbHTML(f) {
-    if (f.is_dir) return `<div class="fc-thumb">${ICON.folder.replace('width="15" height="15"','width="38" height="38"')}</div>`;
+    if (f.is_dir) return `<div class="fc-thumb"><span class="fc-type-icon k-dir">${ICON.folder.replace('width="15" height="15"','width="40" height="40"')}</span></div>`;
     if (isImage(f)) return `<div class="fc-thumb"><img loading="lazy" data-src="${withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1')}" alt=""></div>`;
-    return `<div class="fc-thumb"><span class="fc-type-icon">${iconFor(f).replace('width="15" height="15"','width="38" height="38"')}</span></div>`;
+    return `<div class="fc-thumb"><span class="fc-type-icon k-${kindOf(f)}">${iconFor(f).replace('width="15" height="15"','width="40" height="40"')}</span></div>`;
 }
 function statusOf(f) {
     if (f.is_dir) return 'folder';
@@ -361,7 +367,7 @@ function renderGrid(files) {
             ${st !== 'ok' && st !== 'folder' ? `<span class="fc-badge badge-${st === 'processing' ? 'processing' : 'error'}">${st === 'processing' ? 'PARTIAL' : 'INCOMPLETE'}</span>` : ''}
             <div class="fc-body">
                 <span class="fc-name" title="${esc(f.name)}">${esc(f.name)}</span>
-                <span class="fc-meta">${f.is_dir ? '—' : fmtBytes(f.size)} · ${fmtDate(f.mod_time)}</span>
+                <span class="fc-meta">${f.is_dir ? fmtDateShort(f.mod_time) : fmtBytes(f.size) + ' · ' + fmtDateShort(f.mod_time)}</span>
             </div>`;
         grid.appendChild(card);
         const thumb = card.querySelector('.fc-thumb');
@@ -381,13 +387,14 @@ function renderTable(files) {
         const tr = document.createElement('tr');
         tr.className = 'file-row' + (S.selected.has(f.id) ? ' selected' : '');
         const st = statusOf(f);
+        const thumb = isImage(f) ? '<img loading="lazy" data-src="' + withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1') + '" alt="">' : (f.is_dir ? ICON.folder : iconFor(f));
         tr.innerHTML = `
             <td class="tc"><input type="checkbox" class="checkbox row-check" ${S.selected.has(f.id) ? 'checked' : ''}></td>
-            <td><div class="fr-name"><span class="fr-icon">${f.is_dir ? ICON.folder : (isImage(f) ? '<img loading="lazy" data-src="' + withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1') + '" alt="">' : iconFor(f))}</span>
+            <td><div class="fr-name"><span class="fr-icon k-${kindOf(f)}">${thumb}</span>
                 <span class="fr-label">${esc(f.name)}${f.favorite ? ' <span class="fav-star">♥</span>' : ''}</span></div></td>
-            <td class="fr-status">${st === 'folder' ? '<span class="st folder">Folder</span>' : st === 'ok' ? '<span class="st ok">Saved</span>' : st === 'processing' ? '<span class="st processing">Partial</span>' : '<span class="st error">Incomplete</span>'}${f.replica_servers ? ' <span class="fr-size">' + f.replica_servers + '×' + '</span>' : ''}</td>
-            <td class="fr-size hide-xs">${f.is_dir ? '—' : fmtBytes(f.size)}</td>
-            <td class="fr-date hide-xs">${fmtDate(f.mod_time)}</td>
+            <td class="fr-status">${st === 'processing' ? '<span class="st processing">Partial</span>' : st === 'error' ? '<span class="st error">Incomplete</span>' : ''}</td>
+            <td class="fr-size">${f.is_dir ? '' : fmtBytes(f.size)}</td>
+            <td class="fr-date">${fmtDate(f.mod_time)}</td>
             <td><button class="fr-menu" aria-label="More">⋮</button></td>`;
         tbody.appendChild(tr);
         tr.querySelector('.row-check').addEventListener('click', e => { e.stopPropagation(); toggleSelect(f.id); });
@@ -427,10 +434,15 @@ function renderStatus() {
 }
 function updateStatusIndicator(ready) {
     const dot = $('system-status-dot'), txt = $('system-status-text');
-    if (!ws || ws.readyState !== 1) { dot.className = 'status-dot offline'; txt.textContent = 'Offline'; return; }
+    if (!ws || ws.readyState !== 1) {
+        dot.className = 'status-dot offline'; txt.textContent = 'Offline';
+        if (txt.parentElement) txt.parentElement.classList.add('degraded');
+        return;
+    }
     if (ready === undefined) ready = S.status && S.status.cloud_ready;
     dot.className = 'status-dot ' + (ready ? 'online' : 'warning');
     txt.textContent = ready ? 'Cloud ready' : (S.status && S.status.is_unlocked === false ? 'Locked' : 'Setup needed');
+    if (txt.parentElement) txt.parentElement.classList.toggle('degraded', !ready);
 }
 function renderStorageMeter(d) {
     d = d || S.status || {};
@@ -535,7 +547,7 @@ async function loadTrash() {
         card.innerHTML = `${thumbHTML(f)}
             <button class="fc-menu" aria-label="More">⋮</button>
             <div class="fc-body"><span class="fc-name" title="${esc(f.name)}">${esc(f.name)}</span>
-            <span class="fc-meta">${f.is_dir ? '—' : fmtBytes(f.size)}</span></div>`;
+            <span class="fc-meta">${f.is_dir ? 'Folder' : fmtBytes(f.size)}</span></div>`;
         const t = card.querySelector('.fc-thumb'); if (t) thumbObserver.observe(t);
         const restore = () => trashRestore([f.id]).then(loadTrash);
         card.addEventListener('click', () => {
@@ -598,17 +610,26 @@ async function loadLinks() {
 }
 
 // ---------- preview ----------
-let previewIndex = -1, previewFiles = [];
+let previewIndex = -1, previewFiles = [], previewFor = '';
 async function openPreview(id, openInfo) {
-    const r = await api('/api/files/details?file_id=' + encodeURIComponent(id));
-    if (!r.ok) return toast(r.error || 'Not found', 'error');
-    const f = r.data;
+    // open first, fill second: fetching chunk health can take a second on a
+    // busy host and a dead click feels broken.
+    const modal = $('modal-preview');
+    previewFor = id;
     previewFiles = visibleFiles().filter(x => !x.is_dir);
     previewIndex = previewFiles.findIndex(x => x.id === id);
-    renderPreview(f);
-    $('modal-preview').classList.remove('hidden');
+    const known = previewFiles[previewIndex];
+    $('pm-name').textContent = known ? known.name : 'Loading…';
+    $('pm-size').textContent = known && !known.is_dir ? fmtBytes(known.size) : '';
+    $('pm-stage').innerHTML = '<div class="pm-loading"><span class="spinner"></span>Opening…</div>';
+    $('pm-details-list').innerHTML = ''; $('pm-health-list').innerHTML = ''; $('pm-shares').innerHTML = '';
+    modal.classList.remove('hidden');
     if (openInfo) toggleInfo(true);
-    loadSharesInto(f.id);
+    const r = await api('/api/files/details?file_id=' + encodeURIComponent(id));
+    if (previewFor !== id || modal.classList.contains('hidden')) return; // moved on already
+    if (!r.ok) { modal.classList.add('hidden'); return toast(r.error || 'Not found', 'error'); }
+    renderPreview(r.data);
+    loadSharesInto(id);
 }
 function renderPreview(f) {
     $('pm-name').textContent = f.name;
@@ -894,8 +915,8 @@ document.addEventListener('click', async e => {
     if (e.target.dataset.x === 'cancel' && card) { await api('/api/jobs/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job_id: card.dataset.id }) }); }
     if (e.target.dataset.x === 'dismiss' && card) { allTransfers.delete(card.dataset.id); saveTransfers(); renderTransfers(); }
     if (e.target.dataset.x === 'cancel-all' || e.target.id === 'btn-cancel-all') { await api('/api/jobs/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job_id: 'all' }) }); }
-    if (e.target.id === 'btn-close-transfers') toggleDrawer(false);
-    if (e.target.id === 'btn-open-transfers') toggleDrawer(true);
+    if (e.target.closest('#btn-close-transfers')) toggleDrawer(false);
+    if (e.target.closest('#btn-open-transfers')) toggleDrawer(true);
 });
 function toggleDrawer(open) { $('transfers-drawer').classList.toggle('closed', !open); }
 
@@ -974,7 +995,6 @@ document.addEventListener('click', async e => {
     if (e.target.id === 'btn-lock-now') { await api('/api/auth/lock', { method: 'POST' }); setSession(''); showLock('Locked — unlock to continue.'); }
     if (e.target.id === 'btn-catalog-sync') { const r = await api('/api/catalog/sync', { method: 'POST' }); toast(r.ok ? 'Catalog checkpointed' : 'Failed: ' + r.error, r.ok ? 'success' : 'error'); }
     if (e.target.id === 'btn-catalog-restore') { if (await confirmBox('Restore catalog?', 'Rebuilds the file listing from the last Discord checkpoint.')) { const r = await api('/api/catalog/restore', { method: 'POST' }); toast(r.ok ? 'Catalog restored: ' + (r.data.files_imported || 0) + ' files' : 'Failed: ' + r.error, r.ok ? 'success' : 'error'); reloadCurrent(); } }
-    if (e.target.id === 'btn-sync-catalog') { $('new-menu').classList.add('hidden'); api('/api/catalog/sync', { method: 'POST' }).then(r => toast(r.ok ? 'Catalog backed up to Discord' : 'Backup failed: ' + r.error, r.ok ? 'success' : 'error')); }
 });
 
 // ---------- header / menus ----------
