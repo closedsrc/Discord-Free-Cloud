@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=4002">
+    <link rel="stylesheet" href="style.css?v=4012">
 </head>
 <body class="theme-dark">
 <div class="app">
@@ -66,6 +66,19 @@
                 <span class="nb-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v3.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V15"/><path d="M7.5 10.5 12 15l4.5-4.5M12 15V3.5"/></svg></span>
                 <span>Transfers</span>
                 <span class="nav-badge hidden" id="nav-transfer-badge">0</span>
+            </button>
+            <div class="nav-sep rail-only"></div>
+            <button class="nav-button rail-only" data-view="bots">
+                <span class="nb-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="10" width="17" height="10" rx="2.5"/><circle cx="12" cy="5" r="1.8"/><path d="M12 6.8V10M8.5 15h.01M15.5 15h.01"/></svg></span>
+                <span>My Bots</span>
+            </button>
+            <button class="nav-button rail-only" data-view="servers">
+                <span class="nb-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3.5" width="18" height="7" rx="2"/><rect x="3" y="13.5" width="18" height="7" rx="2"/><path d="M6.5 7h.01M6.5 17h.01"/></svg></span>
+                <span>My Servers</span>
+            </button>
+            <button class="nav-button rail-only" id="nav-activity">
+                <span class="nb-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+                <span>Activity log</span>
             </button>
         </nav>
 
@@ -241,17 +254,27 @@
 <div class="modal hidden" id="modal-preview">
     <div class="preview-modal">
         <div class="pm-head">
-            <button class="pm-nav" id="pm-prev" title="Previous">&lsaquo;</button>
-            <button class="pm-nav" id="pm-next" title="Next">&rsaquo;</button>
             <div class="pm-title"><span id="pm-name">—</span><span class="pm-size" id="pm-size"></span></div>
             <button class="pm-action" id="pm-download" title="Download"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v3.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V15"/><path d="M7.5 10.5 12 15l4.5-4.5M12 15V3.5"/></svg></button>
             <button class="pm-action" id="pm-share" title="Copy share link"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></button>
             <button class="pm-action" id="pm-favorite" title="Favorite"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.2l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg></button>
+            <button class="pm-action pm-zoom-control" id="pm-zoom-out" title="Zoom out">−</button>
+            <span class="pm-zoom-value" id="pm-zoom-value">100%</span>
+            <button class="pm-action pm-zoom-control" id="pm-zoom-in" title="Zoom in">+</button>
+            <button class="pm-action pm-fit" id="pm-fit" title="Fit to window">Fit</button>
             <button class="pm-action" id="pm-info" title="Details"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 16.5V11M12 8h.01"/></svg></button>
             <button class="pm-action close" id="pm-close" title="Close">&times;</button>
         </div>
         <div class="pm-body">
-            <div class="pm-stage" id="pm-stage"></div>
+            <div class="pm-stage-wrap">
+                <button class="pm-edge prev" id="pm-prev" title="Previous (←)" aria-label="Previous file">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 8 12 15 19"/></svg>
+                </button>
+                <button class="pm-edge next" id="pm-next" title="Next (→)" aria-label="Next file">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>
+                </button>
+                <div class="pm-stage" id="pm-stage"></div>
+            </div>
             <aside class="pm-info hidden" id="pm-info-panel">
                 <h4>Details</h4>
                 <dl id="pm-details-list"></dl>
@@ -307,6 +330,6 @@
 <input type="file" id="file-input" multiple hidden>
 <input type="file" id="dir-input" webkitdirectory directory multiple hidden>
 
-<script src="app.js?v=4002"></script>
+<script src="app.js?v=4012"></script>
 </body>
 </html>

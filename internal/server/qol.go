@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -16,16 +17,25 @@ import (
 )
 
 // FileView is what the API exposes about a file: the catalog fields plus
-// storage health (how many encrypted parts exist, how many are stored as real
-// Discord attachments, across how many servers). The dashboard shows the
-// "attachment_count" as stored parts so you can see files really are
-// attachment-backed rather than text-only.
+// storage health. A file is split into parts (chunk indexes) and every part may
+// be stored more than once, on more than one server — so parts, attachments and
+// servers are three different numbers and are reported separately.
 type FileView struct {
 	db.FileRecord
-	AttachmentCount int    `json:"attachment_count"`
-	ChunkCount      int    `json:"chunk_count"`
-	ReplicaServers  int    `json:"replica_servers"`
-	Health          string `json:"health"` // ok | partial | empty
+	AttachmentCount int         `json:"attachment_count"` // completed Discord attachments, replicas included
+	ChunkCount      int         `json:"chunk_count"`      // distinct parts the file is split into
+	ReplicaServers  int         `json:"replica_servers"`  // servers holding at least one part
+	Health          string      `json:"health"`           // ok | partial | empty
+	Parts           []ChunkPart `json:"parts,omitempty"`  // per-part breakdown (details only)
+}
+
+// ChunkPart is one part of a file, collapsed across its replicas.
+type ChunkPart struct {
+	Index   int    `json:"index"`
+	Size    int    `json:"size"`
+	Copies  int    `json:"copies"`
+	Servers int    `json:"servers"`
+	Status  string `json:"status"` // COMPLETED once at least one copy is stored
 }
 
 func (s *Server) fileHealth(fileID string) (int, int, int, string) {
@@ -33,24 +43,68 @@ func (s *Server) fileHealth(fileID string) (int, int, int, string) {
 	if err != nil || len(chunks) == 0 {
 		return 0, 0, 0, "empty"
 	}
-	complete := 0
+	attachments := 0
+	parts := map[int]bool{}
+	storedParts := map[int]bool{}
 	guilds := map[string]bool{}
 	for _, c := range chunks {
+		parts[c.ChunkIndex] = true
 		if c.Status == db.StatusCompleted {
-			complete++
+			attachments++
+			storedParts[c.ChunkIndex] = true
 			if c.GuildID != "" {
 				guilds[c.GuildID] = true
 			}
 		}
 	}
 	health := "ok"
-	if complete < len(chunks) {
+	if len(storedParts) < len(parts) {
 		health = "partial"
 	}
-	if complete == 0 {
+	if len(storedParts) == 0 {
 		health = "empty"
 	}
-	return complete, len(chunks), len(guilds), health
+	return attachments, len(parts), len(guilds), health
+}
+
+// filePartsBreakdown collapses the chunk rows of a file into one entry per part,
+// so the dashboard can show "part 3 — 2 copies on 2 servers" instead of listing
+// the same part once per replica.
+func (s *Server) filePartsBreakdown(fileID string) []ChunkPart {
+	chunks, err := s.db.GetAllChunksForFile(fileID)
+	if err != nil || len(chunks) == 0 {
+		return nil
+	}
+	order := []int{}
+	byIndex := map[int]*ChunkPart{}
+	guilds := map[int]map[string]bool{}
+	for _, c := range chunks {
+		p := byIndex[c.ChunkIndex]
+		if p == nil {
+			p = &ChunkPart{Index: c.ChunkIndex, Size: c.ChunkSize, Status: "PENDING"}
+			byIndex[c.ChunkIndex] = p
+			guilds[c.ChunkIndex] = map[string]bool{}
+			order = append(order, c.ChunkIndex)
+		}
+		if c.Status == db.StatusCompleted {
+			p.Copies++
+			p.Status = db.StatusCompleted
+			if c.ChunkSize > 0 {
+				p.Size = c.ChunkSize
+			}
+			if c.GuildID != "" {
+				guilds[c.ChunkIndex][c.GuildID] = true
+			}
+		}
+	}
+	sort.Ints(order)
+	out := make([]ChunkPart, 0, len(order))
+	for _, i := range order {
+		p := byIndex[i]
+		p.Servers = len(guilds[i])
+		out = append(out, *p)
+	}
+	return out
 }
 
 func (s *Server) decorate(files []db.FileRecord) []FileView {
@@ -305,6 +359,9 @@ func (s *Server) handleFileDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := s.decorate([]db.FileRecord{*f})
+	if !f.IsDir {
+		v[0].Parts = s.filePartsBreakdown(f.ID)
+	}
 	jsonResponse(w, http.StatusOK, v[0])
 }
 

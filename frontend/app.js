@@ -42,17 +42,30 @@ const IMAGE_EXT = new Set(['jpg','jpeg','png','gif','webp','bmp','ico','avif','s
 const VIDEO_EXT = new Set(['mp4','webm','mov','mkv','avi','m4v']);
 const AUDIO_EXT = new Set(['mp3','wav','ogg','flac','aac','m4a','opus']);
 const TEXT_EXT  = new Set(['txt','md','json','log','csv','yml','yaml','xml','ini','cfg','conf','env','toml','sql','sh','bash','bat','ps1','js','ts','jsx','tsx','mjs','css','scss','html','htm','go','py','rb','rs','java','kt','c','h','cpp','hpp','cs','php','lua','swift','r','pl','diff','patch','gitignore','dockerfile','makefile','readme','license','editorconfig']);
-const ARCHIVE_EXT = new Set(['zip','rar','7z','tar','gz','bz2','xz','zst','tgz','iso','apk','jar']);
+const ARCHIVE_EXT = new Set(['zip','rar','7z','tar','gz','bz2','xz','zst','tgz','iso','gpg','asc']);
+const APP_EXT = new Set(['exe','msi','dmg','deb','rpm','appimage','jar','bin','run']);
+const DOC_EXT = new Set(['doc','docx','odt','rtf','pages']);
+const XLS_EXT = new Set(['xls','xlsx','ods','csv','tsv','numbers']);
+const PPT_EXT = new Set(['ppt','pptx','odp','key']);
 const CODE_FAM = new Set(['js','ts','jsx','tsx','mjs','css','scss','html','htm','go','py','rb','rs','java','kt','c','h','cpp','hpp','cs','php','lua','swift','r','pl','sql','json','xml','yml','yaml','sh','bash','ps1','dockerfile']);
 const isImage = f => IMAGE_EXT.has(extOf(f.name));
-const kindOf = f => f.is_dir ? 'dir'
-    : IMAGE_EXT.has(extOf(f.name)) ? 'image'
-    : VIDEO_EXT.has(extOf(f.name)) ? 'video'
-    : AUDIO_EXT.has(extOf(f.name)) ? 'audio'
-    : extOf(f.name) === 'pdf' ? 'pdf'
-    : ARCHIVE_EXT.has(extOf(f.name)) ? 'archive'
-    : CODE_FAM.has(extOf(f.name)) ? 'code'
-    : TEXT_EXT.has(extOf(f.name)) ? 'text' : 'other';
+const kindOf = f => {
+    if (f.is_dir) return 'dir';
+    const e = extOf(f.name);
+    if (IMAGE_EXT.has(e)) return 'image';
+    if (VIDEO_EXT.has(e)) return 'video';
+    if (AUDIO_EXT.has(e)) return 'audio';
+    if (e === 'pdf') return 'pdf';
+    if (DOC_EXT.has(e)) return 'doc';
+    if (XLS_EXT.has(e)) return 'sheetdoc';
+    if (PPT_EXT.has(e)) return 'slides';
+    if (e === 'apk') return 'apk';
+    if (APP_EXT.has(e)) return 'app';
+    if (ARCHIVE_EXT.has(e)) return 'archive';
+    if (CODE_FAM.has(e)) return 'code';
+    if (TEXT_EXT.has(e)) return 'text';
+    return 'other';
+};
 
 // ---------- state ----------
 const S = {
@@ -211,6 +224,7 @@ function switchView(v) {
     $('page-title').textContent = VIEW_TITLES[v] || 'Files';
     if (v === 'drive') { if (S.parentID) { /* keep folder */ } else { S.parentID = ''; S.parentName = ''; } }
     $('search-input').value = ''; $('btn-clear-search').classList.add('hidden');
+    applyToolbarFor(v);
     renderBreadcrumb();
     updateBatchBar();
     if (FILE_VIEWS.has(v)) reloadCurrent();
@@ -221,6 +235,16 @@ function switchView(v) {
     else if (v === 'servers') loadServers();
     document.body.classList.remove('nav-open');
     $('new-menu').classList.add('hidden');
+}
+// The drive toolbar (search scope, New, layout toggle) only makes sense over a
+// file listing; the infrastructure views get a clean header instead.
+function applyToolbarFor(v) {
+    const fileish = FILE_VIEWS.has(v) || v === 'trash';
+    $('search-input').placeholder = v === 'drive' && S.parentID ? 'Search in this folder…'
+        : fileish ? 'Search your drive…' : 'Search your drive…';
+    document.querySelector('.searchbox').classList.toggle('hidden', !fileish);
+    $('btn-new-menu').classList.toggle('hidden', !fileish);
+    document.querySelector('.vtoggle').classList.toggle('hidden', !FILE_VIEWS.has(v));
 }
 function gotoDriveFrom(otherView) {
     if (S.view === otherView && S.parentID) return; // already inside a drive folder
@@ -248,6 +272,7 @@ function navigateUp() { const p = S.trail.pop(); S.parentID = p ? p.id : ''; S.p
 function renderBreadcrumb() {
     const bar = $('breadcrumb-bar'); bar.innerHTML = '';
     if (S.view === 'drive') $('page-title').textContent = S.parentID ? S.parentName : 'Cloud Drive';
+    if (S.view === 'drive') $('search-input').placeholder = S.parentID ? 'Search in this folder…' : 'Search your drive…';
     if (S.view !== 'drive' || !S.parentID) return;
     const crumb = (label, fn, isLast) => {
         const b = document.createElement(isLast ? 'span' : 'button');
@@ -266,17 +291,23 @@ function renderBreadcrumb() {
     }
 }
 
+let loadSeq = 0;
 async function reloadCurrent() {
-    if (S.loading) return; S.loading = true;
+    // Navigations must not be dropped while an earlier list request is still in
+    // flight — on a slow host that left the old contents under the new title.
+    // Latest request wins instead.
+    const seq = ++loadSeq;
     const params = new URLSearchParams();
     if (S.view === 'recents') params.set('view', 'recents');
     else if (S.view === 'favorites') params.set('view', 'favorites');
     else if (S.parentID) params.set('parent_id', S.parentID);
     const q = $('search-input').value.trim();
     if (q) { params.set('search', q); params.delete('parent_id'); params.delete('view'); }
+    S.searchMode = !!q;
+    S.loading = true;
     const r = await api('/api/files/view' + (params.toString() ? '?' + params : ''));
+    if (seq !== loadSeq) return;
     S.files = Array.isArray(r.data) ? r.data : [];
-    if (q) S.searchResults = S.files;
     S.loading = false;
     render();
 }
@@ -295,28 +326,59 @@ function passFilter(f) {
     switch (S.filter) {
         case 'folders': return f.is_dir;
         case 'media': return ['image','video','audio'].includes(kindOf(f));
-        case 'docs': return ['pdf','text'].includes(kindOf(f));
-        case 'archives': return kindOf(f) === 'archive';
+        case 'docs': return ['pdf','text','doc','sheetdoc','slides'].includes(kindOf(f));
+        case 'archives': return ['archive','app','apk'].includes(kindOf(f));
         case 'code': return kindOf(f) === 'code';
-        default: return !f.is_dir || S.view !== 'drive' ? true : true;
+        default: return true;
     }
 }
 function visibleFiles() { return sortFiles(S.files.filter(passFilter)); }
 function currentFolderId() { return S.parentID || (S.files.find(f => f.is_dir) || {}).parent_id || ''; }
 
 // ---------- icons ----------
+// File types read as a light document sheet with one saturated glyph, the way
+// Drive/Filen do it: colour carries the type, the sheet keeps a listing calm.
+const SHEET = '<path d="M6 2.2h7.1l5.5 5.5v11.7a2.4 2.4 0 0 1-2.4 2.4H6a2.4 2.4 0 0 1-2.4-2.4V4.6A2.4 2.4 0 0 1 6 2.2z" fill="#e8eaee"/><path d="M13.1 2.2l5.5 5.5h-5.5z" fill="#b7bcc4"/>';
+const AMBER_SHEET = '<path d="M6 2.2h7.1l5.5 5.5v11.7a2.4 2.4 0 0 1-2.4 2.4H6a2.4 2.4 0 0 1-2.4-2.4V4.6A2.4 2.4 0 0 1 6 2.2z" fill="#f5b425"/><path d="M13.1 2.2l5.5 5.5h-5.5z" fill="#c98d13"/>';
+const sheetIcon = (glyph, base) => `<svg viewBox="0 0 24 24" fill="none">${base || SHEET}${glyph}</svg>`;
+const label = (text, fill) =>
+    `<rect x="4.4" y="12.1" width="13.2" height="6.6" rx="1.5" fill="${fill}"/>` +
+    `<text x="11" y="16.95" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="4.5" font-weight="700" fill="#fff">${text}</text>`;
+
 const ICON = {
-    folder: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
-    image: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>',
-    video: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>',
-    audio: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>',
-    pdf: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
-    archive: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>',
-    code: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
-    text: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>',
-    other: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>',
+    folder: '<svg viewBox="0 0 24 24" fill="none"><path d="M3 6.4A2.4 2.4 0 0 1 5.4 4h3.8l2.1 2.5h7.3A2.4 2.4 0 0 1 21 8.9v9.1a2.4 2.4 0 0 1-2.4 2.4H5.4A2.4 2.4 0 0 1 3 18z" fill="#3b82f6"/><path d="M3 6.4A2.4 2.4 0 0 1 5.4 4h3.8l2.1 2.5H3z" fill="#60a5fa"/></svg>',
+    image: sheetIcon('<path d="M5.4 17.9l3.4-3.6 2.3 2.4 2.5-2.9 3 4.1z" fill="#38bdf8"/><circle cx="8.1" cy="11.6" r="1.35" fill="#0ea5e9"/>'),
+    video: sheetIcon('<rect x="4.6" y="12.2" width="12.8" height="6.4" rx="1.5" fill="#a855f7"/><path d="M9.8 14.1l3.6 1.9-3.6 1.9z" fill="#fff"/>'),
+    audio: sheetIcon('<path d="M9.1 18.2V12.6l5.4-1.1v5.6" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="8" cy="18.3" r="1.5" fill="#22c55e"/><circle cx="14.5" cy="17.1" r="1.5" fill="#22c55e"/>'),
+    pdf: sheetIcon(label('PDF', '#e5484d')),
+    doc: sheetIcon(label('DOC', '#2f7ff5')),
+    sheetdoc: sheetIcon(label('XLS', '#15a35b')),
+    slides: sheetIcon(label('PPT', '#e2711d')),
+    archive: sheetIcon('<path d="M11 3.4v3.1M11 8.1v2M11 11.7v2M11 15.3v2.2" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/><circle cx="11" cy="19.1" r="1.5" fill="#fff"/>', AMBER_SHEET),
+    app: sheetIcon('<circle cx="11" cy="15.4" r="2.1" stroke="#8b95a1" stroke-width="1.5"/><path d="M11 11.3v1M11 19.5v1M7.3 13.3l.9.5M13.8 17l.9.5M7.3 17.5l.9-.5M13.8 13.8l.9-.5" stroke="#8b95a1" stroke-width="1.4" stroke-linecap="round"/>'),
+    apk: sheetIcon('<path d="M6.4 17.6a4.6 4.6 0 0 1 9.2 0z" fill="#3ddc84"/><path d="M7.8 12.4l1 1.7M14.2 12.4l-1 1.7" stroke="#3ddc84" stroke-width="1.4" stroke-linecap="round"/><path d="M6.2 18.6h9.6" stroke="#3ddc84" stroke-width="1.5" stroke-linecap="round"/>'),
+    code: sheetIcon('<path d="M9.2 12.9l-2.3 2.6 2.3 2.6M12.8 12.9l2.3 2.6-2.3 2.6" stroke="#6b8afd" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'),
+    text: sheetIcon('<path d="M6.7 12.7h8.6M6.7 15.5h8.6M6.7 18.3h5.4" stroke="#98a0aa" stroke-width="1.5" stroke-linecap="round"/>'),
+    other: sheetIcon(''),
 };
+ICON.dir = ICON.folder;
 const iconFor = f => ICON[kindOf(f)] || ICON.other;
+
+// Small monochrome glyphs for menus and buttons — never mixed with file icons.
+const ACT = {
+    preview: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 12S6 5.8 12 5.8 21.4 12 21.4 12 18 18.2 12 18.2 2.6 12 2.6 12z"/><circle cx="12" cy="12" r="2.9"/></svg>',
+    download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v3.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V15"/><path d="M7.5 10.5 12 15l4.5-4.5M12 15V3.5"/></svg>',
+    link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
+    rename: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+    move: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><path d="M9.5 13.5h6M13 11l2.5 2.5L13 16"/></svg>',
+    heart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.2l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>',
+    info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 16.5V11M12 8h.01"/></svg>',
+    trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.5h17M9 6.5V4.8A1.3 1.3 0 0 1 10.3 3.5h3.4A1.3 1.3 0 0 1 15 4.8v1.7M6 6.5l.8 12.2A1.8 1.8 0 0 0 8.6 20.5h6.8a1.8 1.8 0 0 0 1.8-1.8l.8-12.2"/></svg>',
+    restore: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3.2 4.5v4.2h4.2"/></svg>',
+    x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+    upload: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v3.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V15"/><path d="M7.5 8 12 3.5 16.5 8M12 3.5V15"/></svg>',
+    open: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+};
 
 // ---------- rendering ----------
 function render() {
@@ -337,14 +399,35 @@ const thumbObserver = new IntersectionObserver(entries => {
     for (const en of entries) {
         if (!en.isIntersecting) continue;
         const img = en.target.querySelector('img');
-        if (img && img.dataset.src) { img.src = img.dataset.src; delete img.dataset.src; }
+        if (img && img.dataset.src) { revealOnLoad(img); img.src = img.dataset.src; delete img.dataset.src; }
         thumbObserver.unobserve(en.target);
     }
 }, { rootMargin: '200px' });
+// list rows put the <img> at the observed node itself
+const rowThumbObserver = new IntersectionObserver(entries => {
+    for (const en of entries) {
+        if (!en.isIntersecting) continue;
+        const img = en.target;
+        if (img.dataset.src) { revealOnLoad(img); img.src = img.dataset.src; delete img.dataset.src; }
+        rowThumbObserver.unobserve(img);
+    }
+}, { rootMargin: '200px' });
+// fade a thumbnail in only once it decodes; a failed shard leaves the type icon
+function revealOnLoad(img) {
+    img.addEventListener('load', () => img.classList.add('on'), { once: true });
+    img.addEventListener('error', () => img.remove(), { once: true });
+}
+// Every thumbnail is the whole file decrypted through Discord — there is no
+// server-side thumbnailer. Cap it at one chunk so a listing cannot pull
+// hundreds of megabytes to paint 28px cells; larger images keep the type icon.
+const THUMB_MAX_BYTES = 8 * 1024 * 1024;
+const thumbable = f => isImage(f) && (f.size || 0) <= THUMB_MAX_BYTES;
 function thumbHTML(f) {
-    if (f.is_dir) return `<div class="fc-thumb"><span class="fc-type-icon k-dir">${ICON.folder.replace('width="15" height="15"','width="40" height="40"')}</span></div>`;
-    if (isImage(f)) return `<div class="fc-thumb"><img loading="lazy" data-src="${withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1')}" alt=""></div>`;
-    return `<div class="fc-thumb"><span class="fc-type-icon k-${kindOf(f)}">${iconFor(f).replace('width="15" height="15"','width="40" height="40"')}</span></div>`;
+    // The type icon always renders underneath; the decrypted thumbnail fades in
+    // over it once Discord returns the bytes, so a cell is never a blank box.
+    const icon = `<span class="fc-type-icon">${f.is_dir ? ICON.folder : iconFor(f)}</span>`;
+    if (thumbable(f)) return `<div class="fc-thumb">${icon}<img loading="lazy" data-src="${withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1')}" alt=""></div>`;
+    return `<div class="fc-thumb">${icon}</div>`;
 }
 function statusOf(f) {
     if (f.is_dir) return 'folder';
@@ -356,18 +439,18 @@ function renderGrid(files) {
     const grid = $('files-grid'); grid.innerHTML = '';
     for (const f of files) {
         const card = document.createElement('article');
-        card.className = 'file-card' + (S.selected.has(f.id) ? ' selected' : '');
+        const bleed = thumbable(f);
+        card.className = 'file-card' + (bleed ? ' bleed' : '') + (S.selected.has(f.id) ? ' selected' : '');
         card.dataset.id = f.id;
         const st = statusOf(f);
         card.innerHTML = `
             ${thumbHTML(f)}
-            <span class="fc-check${S.selected.has(f.id) ? ' on' : ''}">${S.selected.has(f.id) ? '✓' : ''}</span>
+            <span class="fc-check${S.selected.has(f.id) ? ' on' : ''}">✓</span>
             <button class="fc-menu" aria-label="More">⋮</button>
-            ${f.favorite ? '<span class="fc-fav">' + '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>' + '</span>' : ''}
             ${st !== 'ok' && st !== 'folder' ? `<span class="fc-badge badge-${st === 'processing' ? 'processing' : 'error'}">${st === 'processing' ? 'PARTIAL' : 'INCOMPLETE'}</span>` : ''}
             <div class="fc-body">
-                <span class="fc-name" title="${esc(f.name)}">${esc(f.name)}</span>
-                <span class="fc-meta">${f.is_dir ? fmtDateShort(f.mod_time) : fmtBytes(f.size) + ' · ' + fmtDateShort(f.mod_time)}</span>
+                <span class="fc-name" title="${esc(f.name)}">${esc(f.name)}${f.favorite ? ' <span class="fav-star">♥</span>' : ''}</span>
+                <span class="fc-meta">${f.is_dir ? 'Folder' : fmtBytes(f.size) + ' · ' + fmtDateShort(f.mod_time)}</span>
             </div>`;
         grid.appendChild(card);
         const thumb = card.querySelector('.fc-thumb');
@@ -387,7 +470,8 @@ function renderTable(files) {
         const tr = document.createElement('tr');
         tr.className = 'file-row' + (S.selected.has(f.id) ? ' selected' : '');
         const st = statusOf(f);
-        const thumb = isImage(f) ? '<img loading="lazy" data-src="' + withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1') + '" alt="">' : (f.is_dir ? ICON.folder : iconFor(f));
+        const icon = f.is_dir ? ICON.folder : iconFor(f);
+        const thumb = thumbable(f) ? icon + '<img loading="lazy" data-src="' + withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1') + '" alt="">' : icon;
         tr.innerHTML = `
             <td class="tc"><input type="checkbox" class="checkbox row-check" ${S.selected.has(f.id) ? 'checked' : ''}></td>
             <td><div class="fr-name"><span class="fr-icon k-${kindOf(f)}">${thumb}</span>
@@ -403,7 +487,7 @@ function renderTable(files) {
         tr.querySelector('.fr-menu').addEventListener('click', e => { e.stopPropagation(); openFileMenu(f, e.target.getBoundingClientRect()); });
     }
     const imgs = tbody.querySelectorAll('img[data-src]');
-    imgs.forEach(img => { const o = new IntersectionObserver((en, ob) => { if (en[0].isIntersecting) { img.src = img.dataset.src; ob.disconnect(); } }); o.observe(img); });
+    imgs.forEach(img => rowThumbObserver.observe(img));
 }
 function toggleSelect(id) {
     S.selected.has(id) ? S.selected.delete(id) : S.selected.add(id);
@@ -467,21 +551,22 @@ function openFileMenu(f, rect) {
     const menu = document.createElement('div'); menu.className = 'ctx-menu';
     const inTrash = S.view === 'trash';
     const items = [];
+    if (f.is_dir) items.push(['Open', ACT.open, () => openFolderDirect(f)]);
     if (!f.is_dir) {
-        items.push(['Preview', ICON.image, () => openPreview(f.id)]);
-        items.push(['Download', ICON.folder, () => dl(f)]);
-        if (!inTrash) items.push(['Copy share link', ICON.code, () => copyLink(f)]);
+        items.push(['Preview', ACT.preview, () => openPreview(f.id)]);
+        items.push(['Download', ACT.download, () => dl(f)]);
+        if (!inTrash) items.push(['Copy share link', ACT.link, () => copyLink(f)]);
     }
     if (!inTrash) {
-        items.push(['Rename', ICON.text, () => renameItem(f)]);
-        if (!f.is_dir) items.push(['Move to…', ICON.folder, () => moveItem(f)]);
-        items.push([f.favorite ? 'Unfavorite' : 'Add to favorites', ICON.image, () => favoriteItem(f, !f.favorite)]);
-        items.push(['Details', ICON.text, () => openPreview(f.id, true)]);
+        items.push(['Rename', ACT.rename, () => renameItem(f)]);
+        items.push(['Move to…', ACT.move, () => moveItem(f)]);
+        items.push([f.favorite ? 'Remove from favorites' : 'Add to favorites', ACT.heart, () => favoriteItem(f, !f.favorite)]);
+        if (!f.is_dir) items.push(['File details', ACT.info, () => openPreview(f.id, true)]);
     }
     items.push(['sep']);
-    if (inTrash) items.push(['Restore', ICON.folder, () => trashRestore([f.id]), true]);
-    else items.push(['Move to trash', ICON.text, () => trashMove([f.id]), true]);
-    items.push(['Delete forever', ICON.other, () => deleteForever([f.id]), true]);
+    if (inTrash) items.push(['Restore', ACT.restore, () => trashRestore([f.id]), true]);
+    else items.push(['Move to trash', ACT.trash, () => trashMove([f.id]), true]);
+    items.push(['Delete forever', ACT.x, () => deleteForever([f.id]), true]);
     for (const it of items) {
         if (it[0] === 'sep') { const s = document.createElement('div'); s.className = 'ctx-sep'; menu.appendChild(s); continue; }
         const b = document.createElement('button'); b.className = 'ctx-item' + (it[3] ? ' danger' : '');
@@ -543,13 +628,13 @@ async function loadTrash() {
     const grid = $('trash-grid'); grid.innerHTML = '';
     if (!S.trash.length) { grid.innerHTML = '<div class="xfer-empty" style="grid-column:1/-1">Trash is empty.</div>'; return; }
     for (const f of S.trash) {
-        const card = document.createElement('article'); card.className = 'file-card';
+        const card = document.createElement('article');
+        card.className = 'file-card' + (thumbable(f) ? ' bleed' : '');
         card.innerHTML = `${thumbHTML(f)}
             <button class="fc-menu" aria-label="More">⋮</button>
             <div class="fc-body"><span class="fc-name" title="${esc(f.name)}">${esc(f.name)}</span>
             <span class="fc-meta">${f.is_dir ? 'Folder' : fmtBytes(f.size)}</span></div>`;
-        const t = card.querySelector('.fc-thumb'); if (t) thumbObserver.observe(t);
-        const restore = () => trashRestore([f.id]).then(loadTrash);
+        const t = card.querySelector('.fc-thumb'); if (t) thumbObserver.observe(t);        const restore = () => trashRestore([f.id]).then(loadTrash);
         card.addEventListener('click', () => {
             const menu = document.createElement('div'); menu.className = 'ctx-menu';
             const mk = (label, fn, danger) => { const b = document.createElement('button'); b.className = 'ctx-item' + (danger ? ' danger' : ''); b.textContent = label; b.onclick = () => { menu.remove(); fn(); }; menu.appendChild(b); };
@@ -596,7 +681,7 @@ async function loadLinks() {
     for (const { file: f, share: sh } of rows) {
         const div = document.createElement('div'); div.className = 'link-row';
         const exp = sh.expires_at ? new Date(sh.expires_at * 1000).toLocaleString() : 'never';
-        div.innerHTML = `<span class="fr-icon">${iconFor(f)}</span><span class="link-name">${esc(f.name)}</span>
+        div.innerHTML = `<span class="fr-icon">${f.is_dir ? ICON.folder : iconFor(f)}</span><span class="link-name">${esc(f.name)}</span>
             <span class="link-exp">${sh.downloads || 0} dl · ${esc(exp)}${sh.expired ? ' (expired)' : ''}</span>
             <button class="link-copy">Open file</button>
             <button class="link-revoke" data-i="${esc(sh.id)}">Revoke</button>`;
@@ -610,7 +695,25 @@ async function loadLinks() {
 }
 
 // ---------- preview ----------
-let previewIndex = -1, previewFiles = [], previewFor = '';
+let previewIndex = -1, previewFiles = [], previewFor = '', previewZoom = 1, previewCurrent = null;
+let previewPan = { x: 0, y: 0 };
+function applyPreviewTransform() {
+    const img = $('pm-image');
+    if (!img) return;
+    img.style.transform = `translate(${previewPan.x}px, ${previewPan.y}px) scale(${previewZoom})`;
+    img.style.cursor = previewZoom > 1 ? 'grab' : 'zoom-in';
+    const value = $('pm-zoom-value');
+    if (value) value.textContent = Math.round(previewZoom * 100) + '%';
+}
+function setPreviewZoom(next) {
+    previewZoom = Math.max(0.25, Math.min(6, Number(next) || 1));
+    if (previewZoom <= 1) previewPan = { x: 0, y: 0 };
+    applyPreviewTransform();
+}
+function fitPreview() {
+    previewPan = { x: 0, y: 0 };
+    setPreviewZoom(1);
+}
 async function openPreview(id, openInfo) {
     // open first, fill second: fetching chunk health can take a second on a
     // busy host and a dead click feels broken.
@@ -619,26 +722,56 @@ async function openPreview(id, openInfo) {
     previewFiles = visibleFiles().filter(x => !x.is_dir);
     previewIndex = previewFiles.findIndex(x => x.id === id);
     const known = previewFiles[previewIndex];
+    previewCurrent = known || null;
+    document.querySelectorAll('.pm-edge').forEach(el => el.classList.toggle('hidden', previewFiles.length < 2));
     $('pm-name').textContent = known ? known.name : 'Loading…';
     $('pm-size').textContent = known && !known.is_dir ? fmtBytes(known.size) : '';
     $('pm-stage').innerHTML = '<div class="pm-loading"><span class="spinner"></span>Opening…</div>';
     $('pm-details-list').innerHTML = ''; $('pm-health-list').innerHTML = ''; $('pm-shares').innerHTML = '';
+    document.querySelectorAll('.pm-zoom-control,.pm-zoom-value,.pm-fit').forEach(el => el.classList.add('hidden'));
+    previewPan = { x: 0, y: 0 }; previewZoom = 1;
     modal.classList.remove('hidden');
     if (openInfo) toggleInfo(true);
     const r = await api('/api/files/details?file_id=' + encodeURIComponent(id));
     if (previewFor !== id || modal.classList.contains('hidden')) return; // moved on already
-    if (!r.ok) { modal.classList.add('hidden'); return toast(r.error || 'Not found', 'error'); }
+    if (!r.ok) { closePreview(); return toast(r.error || 'Not found', 'error'); }
+    previewCurrent = r.data;
     renderPreview(r.data);
     loadSharesInto(id);
 }
+function previewSubtitle(f) {
+    const parts = f.chunk_count || 0, att = f.attachment_count || 0, srv = f.replica_servers || 0;
+    const bits = [fmtBytes(f.size), parts + (parts === 1 ? ' part' : ' parts')];
+    if (att > parts) bits.push(att + ' attachments');
+    bits.push(srv + (srv === 1 ? ' server' : ' servers'));
+    return bits.join(' · ');
+}
 function renderPreview(f) {
     $('pm-name').textContent = f.name;
-    $('pm-size').textContent = fmtBytes(f.size) + ' · ' + (f.chunk_count || 0) + ' parts · ' + (f.replica_servers || 0) + ' server' + ((f.replica_servers || 0) === 1 ? '' : 's');
+    $('pm-size').textContent = previewSubtitle(f);
     $('pm-favorite').classList.toggle('faved', !!f.favorite);
     const stage = $('pm-stage'); stage.innerHTML = '';
     const k = kindOf(f);
     const media = withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1');
-    if (k === 'image') stage.innerHTML = `<img src="${media}" alt="">`;
+    document.querySelectorAll('.pm-zoom-control,.pm-zoom-value,.pm-fit').forEach(el => el.classList.toggle('hidden', k !== 'image'));
+    if (k === 'image') {
+        stage.innerHTML = '<div class="pm-loading"><span class="spinner"></span>Decrypting…</div>';
+        const img = new Image();
+        img.id = 'pm-image'; img.alt = f.name; img.draggable = false;
+        const fallback = msg => {
+            stage.innerHTML = `<div class="no-preview"><div class="np-icon">${ICON.image}</div>${esc(msg)}<button class="btn-primary btn-sm" id="pm-dl2">Download file</button></div>`;
+            const b = stage.querySelector('#pm-dl2'); if (b) b.onclick = () => dl(f);
+        };
+        // a stalled shard fetch must not leave the viewer spinning forever
+        const slow = setTimeout(() => {
+            const note = stage.querySelector('.pm-loading');
+            if (note) note.innerHTML = '<span class="spinner"></span>Still fetching encrypted parts…<button class="btn-secondary btn-sm" id="pm-dl3">Download instead</button>';
+            const b = stage.querySelector('#pm-dl3'); if (b) b.onclick = () => dl(f);
+        }, 20000);
+        img.onload = () => { clearTimeout(slow); stage.innerHTML = ''; stage.appendChild(img); fitPreview(); };
+        img.onerror = () => { clearTimeout(slow); fallback('This image could not be decoded in the browser.'); };
+        img.src = media;
+    }
     else if (k === 'video') stage.innerHTML = `<video controls autoplay playsinline src="${media}"></video>`;
     else if (k === 'audio') stage.innerHTML = `<audio controls autoplay src="${media}"></audio>`;
     else if (k === 'pdf') stage.innerHTML = `<iframe src="${media}#toolbar=1"></iframe>`;
@@ -647,7 +780,7 @@ function renderPreview(f) {
         fetch(media).then(r => r.text()).then(t => { stage.querySelector('pre').textContent = t.length > 500000 ? t.slice(0, 500000) + '\n\n… truncated — download for full file' : t; })
             .catch(() => stage.innerHTML = '<div class="no-preview"><div class="np-icon">⚠</div>Could not load text preview</div>');
     } else {
-        stage.innerHTML = `<div class="no-preview"><div class="np-icon">${(ICON[k] || ICON.other).replace('width="15" height="15"','width="46" height="46"')}</div>${k === 'dir' ? 'Folder — open from the drive.' : 'No inline preview for this type'}<br><button class="btn-primary btn-sm" style="margin-top:12px" id="pm-dl2">Download file</button></div>`;
+        stage.innerHTML = `<div class="no-preview"><div class="np-icon">${ICON[k] || ICON.other}</div>${k === 'dir' ? 'Folder — open from the drive.' : 'No inline preview for this type'}<button class="btn-primary btn-sm" id="pm-dl2">Download file</button></div>`;
         const b = stage.querySelector('#pm-dl2'); if (b) b.onclick = () => dl(f);
     }
     renderDetails(f);
@@ -660,25 +793,27 @@ function renderDetails(f) {
     add('Size', fmtBytes(f.size)); add('Modified', fmtDate(f.mod_time));
     if (f.sha256) add('SHA-256', f.sha256);
     const h = $('pm-health-list'); h.innerHTML = '';
-    if (f.chunks && f.chunks.length) {
-        f.chunks.forEach(c => {
+    const parts = Array.isArray(f.parts) ? f.parts : [];
+    if (parts.length) {
+        for (const p of parts) {
+            const stored = p.status === 'COMPLETED';
             const row = document.createElement('div'); row.className = 'health-row';
-            row.innerHTML = `<span class="health-dot${c.status === 'COMPLETED' ? '' : ' missing'}"></span>
-                <span class="health-part">part ${c.index + 1}</span><span class="health-size">${fmtBytes(c.size || 0)}</span>`;
-            if (c.status === 'COMPLETED') row.onclick = () => {
-                location.href = withSession('/api/files/raw_chunk?file_id=' + encodeURIComponent(f.id) + '&chunk_index=' + c.index);
-                toast('Downloading raw encrypted part ' + (c.index + 1), 'info');
+            const where = stored
+                ? p.copies + (p.copies === 1 ? ' copy' : ' copies') + (p.servers ? ' · ' + p.servers + (p.servers === 1 ? ' server' : ' servers') : '')
+                : 'not stored yet';
+            row.innerHTML = `<span class="health-dot${stored ? '' : ' missing'}"></span>
+                <span class="health-part">part ${p.index + 1}</span>
+                <span class="health-size">${fmtBytes(p.size || 0)} · ${esc(where)}</span>`;
+            if (stored) row.onclick = () => {
+                location.href = withSession('/api/files/raw_chunk?file_id=' + encodeURIComponent(f.id) + '&chunk_index=' + p.index);
+                toast('Downloading raw encrypted part ' + (p.index + 1), 'info');
             };
             h.appendChild(row);
-        });
-    } else if (!f.is_dir) {
-        for (let i = 0; i < (f.chunk_count || 0); i++) {
-            const row = document.createElement('div'); row.className = 'health-row';
-            const ok = i < (f.attachment_count || 0);
-            row.innerHTML = `<span class="health-dot${ok ? '' : ' missing'}"></span><span class="health-part">part ${i + 1}</span><span class="health-size">${ok ? 'encrypted PNG stored on Discord' : 'missing'}</span>`;
-            if (ok) row.onclick = () => { location.href = withSession('/api/files/raw_chunk?file_id=' + encodeURIComponent(f.id) + '&chunk_index=' + i); };
-            h.appendChild(row);
         }
+    } else if (!f.is_dir) {
+        const row = document.createElement('div'); row.className = 'health-row';
+        row.innerHTML = '<span class="health-dot missing"></span><span class="health-part">no parts recorded</span>';
+        h.appendChild(row);
     }
     const vr = document.createElement('button'); vr.className = 'btn-secondary btn-sm'; vr.style.width = '100%';
     vr.textContent = 'Verify integrity (re-download + hash)';
@@ -700,7 +835,7 @@ async function loadSharesInto(id) {
     const r = await api('/api/shares/list?file_id=' + encodeURIComponent(id));
     const box = $('pm-shares'); if (!box) return; box.innerHTML = '';
     const shares = (r.data && r.data.shares) || [];
-    if (!shares.length) { box.innerHTML = '<div style="font-size:11.5px;color:var(--text-faint)">No active links.</div>'; return; }
+    if (!shares.length) { box.innerHTML = '<div class="pm-empty">No active links.</div>'; return; }
     for (const sh of shares) {
         const div = document.createElement('div'); div.className = 'share-row';
         div.innerHTML = `<span>${sh.downloads || 0} dl</span><span class="share-exp">${esc(sh.expires_at ? new Date(sh.expires_at * 1000).toLocaleDateString() : '—')}</span><button class="share-rev" title="Revoke">&times;</button>`;
@@ -712,25 +847,75 @@ function toggleInfo(force) {
     const p = $('pm-info-panel');
     p.classList.toggle('hidden', force === true ? false : force === false ? true : !p.classList.contains('hidden'));
 }
+function closePreview() {
+    const modal = $('modal-preview');
+    modal.classList.add('hidden');
+    previewFor = ''; previewCurrent = null;
+    // clearing the stage stops <video>/<audio> — merely hiding the modal keeps it playing
+    $('pm-stage').innerHTML = '';
+}
+const previewTarget = () => previewCurrent || previewFiles[previewIndex] || null;
 document.addEventListener('click', e => {
-    if (e.target.closest('#pm-close') || (e.target.id === 'modal-preview' && !e.target.closest('.preview-modal'))) $('modal-preview').classList.add('hidden');
+    if (e.target.closest('#pm-close') || (e.target.id === 'modal-preview' && !e.target.closest('.preview-modal'))) closePreview();
     if (e.target.closest('#pm-info')) toggleInfo();
-    if (e.target.closest('#pm-download')) { const f = previewFiles[previewIndex]; if (f) dl(f); }
-    if (e.target.closest('#pm-share')) { const f = previewFiles[previewIndex]; if (f) copyLink(f); }
-    if (e.target.closest('#pm-favorite')) { const f = previewFiles[previewIndex]; if (f) favoriteItem(f, !f.favorite).then(() => { $('pm-favorite').classList.toggle('faved', !!f.favorite); }); }
+    if (e.target.closest('#pm-download')) { const f = previewTarget(); if (f) dl(f); }
+    if (e.target.closest('#pm-share')) { const f = previewTarget(); if (f) copyLink(f); }
+    if (e.target.closest('#pm-favorite')) { const f = previewTarget(); if (f) favoriteItem(f, !f.favorite).then(() => $('pm-favorite').classList.toggle('faved', !!f.favorite)); }
     if (e.target.closest('#pm-prev')) navPreview(-1);
     if (e.target.closest('#pm-next')) navPreview(1);
+    if (e.target.closest('#pm-zoom-in')) setPreviewZoom(previewZoom * 1.25);
+    if (e.target.closest('#pm-zoom-out')) setPreviewZoom(previewZoom / 1.25);
+    if (e.target.closest('#pm-fit')) fitPreview();
+    // releasing a pan fires a click on the image; that must not snap zoom back
+    if (e.target.id === 'pm-image' && !panJustEnded) setPreviewZoom(previewZoom > 1 ? 1 : 2);
 });
+// ctrl/⌘ + wheel zooms the image like a desktop viewer; plain wheel still scrolls
+document.addEventListener('wheel', e => {
+    if (!$('pm-image') || !e.target.closest('#pm-stage')) return;
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    setPreviewZoom(previewZoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
+}, { passive: false });
+// drag to pan once zoomed past fit
+let panJustEnded = false;
+(() => {
+    let panning = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
+    document.addEventListener('mousedown', e => {
+        if (e.target.id !== 'pm-image' || previewZoom <= 1) return;
+        panning = true; moved = false; sx = e.clientX; sy = e.clientY; ox = previewPan.x; oy = previewPan.y;
+        e.target.classList.add('panning');
+        e.target.style.cursor = 'grabbing'; e.preventDefault();
+    });
+    document.addEventListener('mousemove', e => {
+        if (!panning) return;
+        if (Math.abs(e.clientX - sx) > 3 || Math.abs(e.clientY - sy) > 3) moved = true;
+        previewPan = { x: ox + (e.clientX - sx), y: oy + (e.clientY - sy) };
+        applyPreviewTransform();
+    });
+    document.addEventListener('mouseup', () => {
+        if (!panning) return;
+        panning = false;
+        panJustEnded = moved;
+        const img = $('pm-image'); if (img) img.classList.remove('panning');
+        applyPreviewTransform();
+        setTimeout(() => { panJustEnded = false; }, 0);
+    });
+})();
 function navPreview(dir) {
-    if (!previewFiles.length) return;
+    if (previewFiles.length < 2) return;
     previewIndex = (previewIndex + dir + previewFiles.length) % previewFiles.length;
     openPreview(previewFiles[previewIndex].id);
 }
 document.addEventListener('keydown', e => {
     if ($('modal-preview').classList.contains('hidden')) return;
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
     if (e.key === 'ArrowLeft') navPreview(-1);
     if (e.key === 'ArrowRight') navPreview(1);
-    if (e.key === 'Escape') $('modal-preview').classList.add('hidden');
+    if (e.key === 'Escape') closePreview();
+    if (!$('pm-image')) return;
+    if (e.key === '+' || e.key === '=') { e.preventDefault(); setPreviewZoom(previewZoom * 1.25); }
+    if (e.key === '-' || e.key === '_') { e.preventDefault(); setPreviewZoom(previewZoom / 1.25); }
+    if (e.key === '0') { e.preventDefault(); fitPreview(); }
 });
 
 // ---------- dialogs ----------
@@ -877,7 +1062,7 @@ document.addEventListener('drop', e => {
 function xferCard(t, id) {
     const st = t.status === 'COMPLETED' ? 'done' : t.status === 'FAILED' ? 'failed' : t.status === 'PAUSED' ? 'paused' : 'active';
     const label = { done: 'Done', failed: 'Failed', paused: 'Paused', active: (t.type === 'DOWNLOAD' ? 'Downloading' : t.type === 'DELETE' ? 'Cleaning' : 'Uploading') }[st];
-    const icon = ICON.archive;
+    const icon = t.type === 'DOWNLOAD' ? ACT.download : t.type === 'DELETE' ? ACT.trash : ACT.upload;
     return `<div class="xfer-card" data-id="${esc(id)}">
         <div class="xfer-top"><span class="xfer-ic">${icon}</span>
             <div style="min-width:0;flex:1"><div class="xfer-name">${esc(t.name)}</div>
@@ -951,21 +1136,39 @@ document.addEventListener('click', async e => {
     }
     if (e.target.id === 'btn-banner-bots') switchView('bots');
 });
+// Discord-style initial tile: letter and hue both derive from the name, so two
+// servers never render as the same badge.
+const AVATAR_HUES = ['#2f7ff5', '#5865f2', '#a855f7', '#31c48d', '#f5a524', '#e5484d', '#0ea5e9'];
+const avatarFor = name => {
+    const label = String(name || '?').trim();
+    let h = 0;
+    for (let i = 0; i < label.length; i++) h = (h * 31 + label.charCodeAt(i)) >>> 0;
+    return { letter: (label[0] || '?').toUpperCase(), hue: AVATAR_HUES[h % AVATAR_HUES.length] };
+};
 async function loadServers() {
     const r = await api('/api/servers');
     S.servers = (r.data && r.data.servers) || [];
     const box = $('servers-list');
     if (!S.servers.length) { box.innerHTML = '<div class="infra-card">No servers connected. Add a bot to replicate encrypted shards across servers.</div>'; return; }
-    box.innerHTML = S.servers.map(s => `<div class="server-card">
-        <span class="bc-avatar" style="background:var(--green)">S</span>
-        <div class="bc-main"><div class="bc-name">${esc(s.guild_name || s.guild_id)}</div><div class="bc-sub">${s.channel_count || 0} channels · shard ${s.status || 'unknown'}</div></div>
-        <div class="bc-stats"><span>${fmtBytes(s.storage_bytes || 0)}</span></div></div>`).join('');
+    box.innerHTML = S.servers.map(s => {
+        const name = s.guild_name || s.guild_id || 'Server';
+        const av = avatarFor(name);
+        const ok = /^active$/i.test(s.status || '');
+        const state = s.status
+            ? `<span class="st ${ok ? 'ok' : 'processing'}">${esc(s.status)}</span>`
+            : '<span class="st">unknown</span>';
+        return `<div class="server-card">
+        <span class="bc-avatar" style="background:${av.hue}">${esc(av.letter)}</span>
+        <div class="bc-main"><div class="bc-name">${esc(name)}</div>
+        <div class="bc-sub">${s.channel_count || 0} storage channels · shards ${state}</div></div>
+        <div class="bc-stats"><span>${fmtBytes(s.storage_bytes || 0)}</span></div></div>`;
+    }).join('');
     populateTargets();
 }
 function populateTargets() {
     const sel = $('upload-target-select');
     const cur = sel.value;
-    sel.innerHTML = '<option value="all">Every server (replicate)</option>';
+    sel.innerHTML = '<option value="all">Every server</option>';
     for (const s of S.servers) { const o = document.createElement('option'); o.value = s.guild_id; o.textContent = s.guild_name || s.guild_id; sel.appendChild(o); }
     sel.value = [...sel.options].some(o => o.value === cur) ? cur : 'all';
 }
@@ -999,13 +1202,27 @@ document.addEventListener('click', async e => {
 
 // ---------- header / menus ----------
 function wireUI() {
-    document.querySelectorAll('.nav-button').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
+    document.querySelectorAll('.nav-button[data-view]').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
+    $('nav-activity').addEventListener('click', () => {
+        document.body.classList.remove('nav-open');
+        $('log-drawer').classList.add('open'); $('drawer-scrim').classList.remove('hidden');
+    });
     $('btn-settings').addEventListener('click', () => switchView('settings'));
     $('btn-mobile-menu').addEventListener('click', () => document.body.classList.toggle('nav-open'));
     $('sidebar-scrim').addEventListener('click', () => document.body.classList.remove('nav-open'));
     $('btn-unlock').addEventListener('click', unlock);
     $('lock-password').addEventListener('keydown', e => { if (e.key === 'Enter') unlock(); });
-    $('btn-new-menu').addEventListener('click', e => { e.stopPropagation(); $('new-menu').classList.toggle('hidden'); });
+    $('btn-new-menu').addEventListener('click', e => {
+        e.stopPropagation();
+        const menu = $('new-menu');
+        menu.classList.toggle('hidden');
+        if (menu.classList.contains('hidden')) return;
+        // anchor the panel to the button that opened it
+        const b = $('btn-new-menu').getBoundingClientRect();
+        const main = document.querySelector('.main').getBoundingClientRect();
+        menu.style.top = Math.round(b.bottom - main.top + 6) + 'px';
+        menu.style.right = Math.max(8, Math.round(main.right - b.right)) + 'px';
+    });
     document.addEventListener('click', e => { if (!e.target.closest('#new-menu') && !e.target.closest('#btn-new-menu')) $('new-menu').classList.add('hidden'); });
     $('menu-upload-files').addEventListener('click', () => { $('file-input').click(); });
     $('menu-upload-folder').addEventListener('click', () => { $('dir-input').click(); });
