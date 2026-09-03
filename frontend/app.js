@@ -17,9 +17,38 @@ function escapeHtml(text) {
         .replace(/'/g, "&#039;");
 }
 
+// Session handling. /api/auth/unlock mints a random session id that is stored
+// server-side (in-memory, 12h sliding expiry). XHR carries it in a header;
+// native media/download/WebSocket URLs — which cannot set headers — carry it
+// as a ?session= query. If no API tokens are seeded server-side the auth gate
+// is off and these are simply ignored by the server.
+function dfcSession() {
+    try { return localStorage.getItem("dfc_session") || ""; } catch (e) { return ""; }
+}
+function setDfcSession(token) {
+    try { if (token) localStorage.setItem("dfc_session", token); else localStorage.removeItem("dfc_session"); } catch (e) {}
+}
+function withSession(url) {
+    const tok = dfcSession();
+    if (!tok) return url;
+    return url + (url.includes("?") ? "&" : "?") + "session=" + encodeURIComponent(tok);
+}
+
 async function apiFetch(url, options = {}) {
     try {
+        options.headers = { ...(options.headers || {}) };
+        const tok = dfcSession();
+        if (tok) options.headers["X-DFC-Session"] = tok;
         const res = await fetch(url, options);
+        if (res.status === 401 && !url.startsWith("/api/auth/")) {
+            // Session expired or server restarted: drop it and re-show the lock.
+            setDfcSession("");
+            const overlay = document.getElementById("lock-screen-overlay");
+            if (overlay && typeof initAuthLock === "function") {
+                authState = { has_password: true, is_unlocked: false };
+                overlay.classList.remove("hidden");
+            }
+        }
         const contentType = res.headers.get("content-type") || "";
         let data = null;
         if (contentType.includes("application/json")) {
@@ -86,8 +115,7 @@ async function loadStatus() {
     }
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-    initAuthLock();
+document.addEventListener("DOMContentLoaded", async () => {
     initNavigation();
     initQuickSetupWizard();
     initDragAndDrop();
@@ -98,17 +126,28 @@ document.addEventListener("DOMContentLoaded", () => {
     initFilters();
     initBotActions();
     initServerActions();
-    initWebSocket();
-    loadStatus();
-    loadFiles("");
-    loadBots();
-    loadServers();
-    loadSettings();
+
+    const unlocked = await initAuthLock();
+    if (unlocked) {
+        initWebSocket();
+        loadStatus();
+        loadFiles("");
+        loadBots();
+        loadServers();
+        loadSettings();
+    }
 });
+
+let wsReconnectTimer = null;
 
 function initWebSocket() {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${proto}//${window.location.host}/ws`;
+    // The WebSocket handshake cannot set headers, so the session rides along
+    // as a query parameter (the server's auth gate accepts it there).
+    const wsUrl = withSession(`${proto}//${window.location.host}/ws`);
+
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+    try { if (ws) { ws.onclose = null; ws.close(); } } catch (e) {}
 
     ws = new WebSocket(wsUrl);
 
@@ -127,8 +166,12 @@ function initWebSocket() {
 
     ws.onclose = () => {
         updateCloudStatus(null);
-        setTimeout(initWebSocket, 3000);
+        wsReconnectTimer = setTimeout(initWebSocket, 3000);
     };
+}
+
+function reconnectWebSocket() {
+    initWebSocket();
 }
 
 let pendingHighlightFileId = null;
@@ -282,7 +325,7 @@ function renderTransfersDrawer() {
 window.cancelJob = async function(jobId) {
     if (!jobId) return;
     try {
-        await fetch("/api/jobs/cancel", {
+        await apiFetch("/api/jobs/cancel", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ job_id: jobId })
@@ -600,7 +643,7 @@ function initNavigation() {
     if (cancelBtn) {
         cancelBtn.addEventListener("click", async () => {
             if (activeJobID) {
-                await fetch("/api/jobs/cancel", {
+                apiFetch("/api/jobs/cancel", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ job_id: activeJobID })
@@ -1536,9 +1579,18 @@ function renderFileTable(files) {
             btnDownload.textContent = "Download";
             btnDownload.addEventListener("click", (e) => {
                 e.stopPropagation();
-                window.location.href = `/api/download?file_id=${encodeURIComponent(item.id)}`;
+                window.location.href = withSession(`/api/download?file_id=${encodeURIComponent(item.id)}`);
             });
             actionsGroup.appendChild(btnDownload);
+
+            const btnShare = document.createElement("button");
+            btnShare.className = "btn-row-action";
+            btnShare.textContent = "Share";
+            btnShare.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                await createShareLink(item);
+            });
+            actionsGroup.appendChild(btnShare);
         }
 
         const btnDelete = document.createElement("button");
@@ -1639,6 +1691,29 @@ function updateBreadcrumbUI() {
     });
 }
 
+async function createShareLink(item) {
+    showToast(`Creating share link for ${item.name}...`, "info");
+    const { ok, data } = await apiFetch("/api/shares/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_id: item.id })
+    });
+    if (ok && data.ok) {
+        // The server builds the URL from forwarded-proxy headers, so it is the
+        // public HTTPS host rather than whatever origin the page thinks it has.
+        const url = data.url || `${location.protocol}//${location.host}/api/share/${data.token}`;
+        try {
+            await navigator.clipboard.writeText(url);
+            showToast("Share link copied (valid 7 days)", "success");
+        } catch (e) {
+            showToast("Share link: " + url, "info");
+        }
+        addLogEntry(`Share link created for ${item.name}`, "success");
+    } else {
+        showToast(`Could not create share link: ${data.error || "Server error"}`, "error");
+    }
+}
+
 async function openFilePreview(file) {
     const modal = document.getElementById("modal-preview");
     const title = document.getElementById("preview-filename");
@@ -1652,14 +1727,14 @@ async function openFilePreview(file) {
     if (icon) icon.innerHTML = getFileIconSvg(file.name, false);
     if (dlBtn) {
         dlBtn.onclick = () => {
-            window.location.href = `/api/download?file_id=${encodeURIComponent(file.id)}`;
+            window.location.href = withSession(`/api/download?file_id=${encodeURIComponent(file.id)}`);
         };
     }
 
     container.innerHTML = `<div class="preview-loading">Loading preview...</div>`;
     modal.classList.remove("hidden");
 
-    const streamUrl = `/api/download/file?file_id=${encodeURIComponent(file.id)}&inline=1`;
+    const streamUrl = withSession(`/api/download/file?file_id=${encodeURIComponent(file.id)}&inline=1`);
     const ext = (file.name || "").split('.').pop().toLowerCase();
 
     if (['mp4', 'webm', 'mov', 'mkv'].includes(ext)) {
@@ -2543,16 +2618,21 @@ async function initAuthLock() {
     const btnSubmit = document.getElementById("btn-submit-lock");
     const btnText = document.getElementById("btn-submit-lock-text");
 
-    if (!overlay || !inputEl || !btnSubmit) return;
+    if (!overlay || !inputEl || !btnSubmit) return true;
 
     const { ok, data } = await apiFetch("/api/auth/status");
     if (ok) {
         authState = data;
     }
 
-    if (authState.is_unlocked) {
+    // A headless-unlocked server still requires the browser to present its
+    // own session once API tokens are enabled (auth_required): the master key
+    // lives server-side, but requests must be attributable.
+    const needsUnlock = !authState.is_unlocked || (authState.auth_required && !authState.has_session);
+
+    if (!needsUnlock) {
         overlay.classList.add("hidden");
-        return;
+        return true;
     }
 
     overlay.classList.remove("hidden");
@@ -2587,6 +2667,7 @@ async function initAuthLock() {
 
         btnSubmit.disabled = false;
         if (submitOk && submitData.ok) {
+            if (submitData.session) setDfcSession(submitData.session);
             showToast("Drive unlocked", "success");
             addLogEntry("Drive unlocked", "success");
             overlay.classList.add("hidden");
@@ -2595,6 +2676,7 @@ async function initAuthLock() {
             loadBots();
             loadServers();
             loadStatus();
+            reconnectWebSocket();
         } else {
             const errMsg = submitData.error || "Incorrect password";
             showToast(errMsg, "error");
@@ -2606,4 +2688,5 @@ async function initAuthLock() {
     inputEl.onkeydown = (e) => {
         if (e.key === "Enter") doSubmit();
     };
+    return false;
 }

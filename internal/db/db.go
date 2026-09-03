@@ -212,6 +212,14 @@ func (d *Database) migrate() error {
 		bot_id TEXT DEFAULT '',
 		invite_url TEXT DEFAULT ''
 	);
+
+	CREATE TABLE IF NOT EXISTS shares (
+		token_hash TEXT PRIMARY KEY,
+		file_id TEXT NOT NULL,
+		expires_at BIGINT NOT NULL,
+		created_at BIGINT NOT NULL,
+		downloads BIGINT DEFAULT 0
+	);
 	`
 	if _, err := d.db.Exec(schema); err != nil {
 		return err
@@ -231,6 +239,7 @@ func (d *Database) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_channels_category ON channels(category_id);
 	CREATE INDEX IF NOT EXISTS idx_chunks_sha256 ON chunks(sha256);
 	CREATE INDEX IF NOT EXISTS idx_chunks_file_idx ON chunks(file_id, chunk_index);
+	CREATE INDEX IF NOT EXISTS idx_shares_file ON shares(file_id);
 	`
 	if _, err := d.db.Exec(indexes); err != nil {
 		return err

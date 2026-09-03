@@ -47,6 +47,9 @@ type Server struct {
 	wsClients map[*websocket.Conn]bool
 
 	syncMu sync.Mutex // serializes server/node syncing + provisioning
+
+	sessMu   sync.Mutex
+	sessions map[string]time.Time // session token -> expiry
 }
 
 func NewServer(database *db.Database, discordClient *discord.Client, upEngine *uploader.Engine, downEngine *downloader.Engine, catManager *catalog.Manager, frontend fs.FS) *Server {
@@ -116,7 +119,9 @@ func (s *Server) broadcastJSON(payload any) {
 	}
 }
 
-func (s *Server) RegisterRoutes(mux *http.ServeMux) {
+// RegisterRoutes wires every endpoint onto mux and returns the auth-wrapped
+// handler the caller should serve — see the note at the end of this function.
+func (s *Server) RegisterRoutes(mux *http.ServeMux) http.Handler {
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/settings", s.handleSettings)
@@ -150,6 +155,13 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/status", s.handleAuthStatus)
 	mux.HandleFunc("/api/auth/unlock", s.handleAuthUnlock)
 	mux.HandleFunc("/api/auth/set_password", s.handleAuthSetPassword)
+	mux.HandleFunc("/api/auth/lock", s.handleAuthLock)
+	mux.HandleFunc("/api/create-token", s.handleCreateToken)
+	mux.HandleFunc("/api/shares/create", s.handleShareCreate)
+	mux.HandleFunc("/api/shares/list", s.handleShareList)
+	mux.HandleFunc("/api/shares/revoke", s.handleShareRevoke)
+	mux.HandleFunc("/api/share/", s.handleSharePublic)
+	mux.HandleFunc("/api/verify", s.handleVerifyFile)
 
 	var fileHandler http.Handler
 	if _, err := os.Stat(filepath.Join("frontend", "index.html")); err == nil {
@@ -158,6 +170,11 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 		fileHandler = http.FileServer(http.FS(s.frontendFS))
 	}
 	mux.Handle("/", fileHandler)
+
+	// The auth middleware is applied here rather than in main so every caller
+	// of RegisterRoutes gets a guarded handler: no API tokens seeded means it
+	// is a transparent pass-through (first-run dashboard unchanged).
+	return s.requireAuth(mux)
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -264,8 +281,30 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		if token, ok := settings["bot_token"]; ok && len(token) > 10 {
-			settings["bot_token_masked"] = token[:4] + "..." + token[len(token)-4:]
+		// The dashboard only ever needs to know *whether* a secret is set —
+		// never the secret. bot_token used to be returned verbatim here, and
+		// password/token hashes are equally sensitive.
+		redactedSettings := map[string]string{
+			"master_pass_hash":     "master_password_set",
+			"api_token_write_hash": "api_token_write_set",
+			"api_token_read_hash":  "api_token_read_set",
+		}
+		for key, flag := range redactedSettings {
+			if v, ok := settings[key]; ok {
+				delete(settings, key)
+				settings[flag] = boolString(v != "")
+			}
+		}
+		if salt, ok := settings["master_salt_hex"]; ok {
+			delete(settings, "master_salt_hex")
+			settings["master_salt_set"] = boolString(salt != "")
+		}
+		if token, ok := settings["bot_token"]; ok {
+			settings["bot_token_masked"] = ""
+			if len(token) > 10 {
+				settings["bot_token_masked"] = token[:4] + "..." + token[len(token)-4:]
+			}
+			settings["bot_token"] = ""
 		}
 		jsonResponse(w, http.StatusOK, settings)
 		return
@@ -1951,9 +1990,11 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	isUnlocked := s.uploader.HasMasterKey()
 
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"ok":           true,
-		"has_password": passHash != "",
-		"is_unlocked":  isUnlocked,
+		"ok":            true,
+		"has_password":  passHash != "",
+		"is_unlocked":   isUnlocked,
+		"auth_required": s.authEnabled() && !s.sessionValid(r),
+		"has_session":   s.sessionValid(r),
 	})
 }
 
@@ -1976,11 +2017,23 @@ func (s *Server) handleAuthUnlock(w http.ResponseWriter, r *http.Request) {
 
 	var salt []byte
 	if saltHex != "" {
-		salt, _ = hex.DecodeString(saltHex)
-	}
-	if len(salt) == 0 {
-		salt, _ = crypto.GenerateSalt()
-		_ = s.db.SetSetting("master_salt_hex", hex.EncodeToString(salt))
+		var err error
+		salt, err = hex.DecodeString(saltHex)
+		if err != nil || len(salt) == 0 {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "Corrupt salt — refusing to unlock"})
+			return
+		}
+	} else {
+		var err error
+		salt, err = crypto.GenerateSalt()
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if err := s.db.SetSetting("master_salt_hex", hex.EncodeToString(salt)); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
 	}
 
 	masterKey := crypto.DeriveKey(req.Password, salt)
@@ -1992,16 +2045,27 @@ func (s *Server) handleAuthUnlock(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if passHash == "" {
-		_ = s.db.SetSetting("master_pass_hash", computedHash)
+		if err := s.db.SetSetting("master_pass_hash", computedHash); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
 	}
 
 	s.uploader.SetMasterKey(masterKey)
 	s.downloader.SetMasterKey(masterKey)
 	s.catalog.SetMasterKey(masterKey)
 
+	sessionToken, err := s.issueSession()
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	s.setSessionCookie(w, sessionToken)
+
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"ok":     true,
-		"status": "unlocked",
+		"ok":      true,
+		"status":  "unlocked",
+		"session": sessionToken,
 	})
 }
 
@@ -2019,20 +2083,38 @@ func (s *Server) handleAuthSetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	salt, _ := crypto.GenerateSalt()
+	salt, err := crypto.GenerateSalt()
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
 	masterKey := crypto.DeriveKey(req.Password, salt)
 	passHash := crypto.ComputeSHA256(masterKey)
 
-	_ = s.db.SetSetting("master_salt_hex", hex.EncodeToString(salt))
-	_ = s.db.SetSetting("master_pass_hash", passHash)
+	if err := s.db.SetSetting("master_salt_hex", hex.EncodeToString(salt)); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if err := s.db.SetSetting("master_pass_hash", passHash); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
 
 	s.uploader.SetMasterKey(masterKey)
 	s.downloader.SetMasterKey(masterKey)
 	s.catalog.SetMasterKey(masterKey)
 
+	sessionToken, err := s.issueSession()
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	s.setSessionCookie(w, sessionToken)
+
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"ok":     true,
-		"status": "password_set",
+		"ok":      true,
+		"status":  "password_set",
+		"session": sessionToken,
 	})
 }
 
@@ -2040,6 +2122,13 @@ func jsonResponse(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+func boolString(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
 }
 
 func formatBytes(b int64) string {

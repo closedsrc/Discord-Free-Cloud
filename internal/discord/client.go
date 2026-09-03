@@ -61,9 +61,9 @@ type Client struct {
 	globalLock RateLimitTracker
 
 	// category pool configuration
-	poolPrefix   string
-	baseCatsMu   sync.Mutex
-	baseCats     map[string]string // guild id -> base category id ("" = auto-create)
+	poolPrefix string
+	baseCatsMu sync.Mutex
+	baseCats   map[string]string // guild id -> base category id ("" = auto-create)
 }
 
 func NewClient(botToken string) *Client {

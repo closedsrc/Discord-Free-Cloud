@@ -121,7 +121,13 @@ func main() {
 	)
 
 	mux := http.NewServeMux()
-	srv.RegisterRoutes(mux)
+	handler := srv.RegisterRoutes(mux)
+
+	// Seed API tokens from the (root-only) environment before the first request
+	// can arrive, so headless installs are scriptable from the start.
+	if srv.EnsureSeededTokens() {
+		log.Printf("API token auth enabled (seeded from DFC_API_TOKEN_WRITE/DFC_API_TOKEN_READ)")
+	}
 
 	targetPort := *portFlag
 	var listener net.Listener
@@ -143,7 +149,7 @@ func main() {
 	log.Printf("Server running at %s\n", serverURL)
 
 	httpServer := &http.Server{
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
