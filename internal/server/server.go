@@ -519,10 +519,40 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 	}
 	metaChannel, _ := s.db.GetMetadataChannel()
 
+	// Channel rows carry webhook URLs and bot tokens; the dashboard only needs
+	// names and ids, and leaking either lets anyone read/upload to the pool.
+	type channelView struct {
+		ID          string `json:"id"`
+		ChannelID   string `json:"channel_id"`
+		ChannelName string `json:"channel_name"`
+		GuildID     string `json:"guild_id"`
+		IsMetadata  bool   `json:"is_metadata"`
+	}
+	view := func(c db.ChannelRecord) channelView {
+		return channelView{
+			ID:          strconv.FormatInt(c.ID, 10),
+			ChannelID:   c.ChannelID,
+			ChannelName: c.ChannelName,
+			GuildID:     c.GuildID,
+			IsMetadata:  c.IsMetadata,
+		}
+	}
+
+	out := make([]channelView, 0, len(channels))
+	for _, c := range channels {
+		out = append(out, view(c))
+	}
+
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"ok":               true,
-		"storage_channels": channels,
-		"metadata_channel": metaChannel,
+		"storage_channels": out,
+		"metadata_channel": func() *channelView {
+			if metaChannel == nil {
+				return nil
+			}
+			v := view(*metaChannel)
+			return &v
+		}(),
 	})
 }
 
