@@ -333,23 +333,21 @@ func (s *Server) EnsureSeededTokens() bool {
 	return seeded || s.authEnabled()
 }
 
-// handleCreateToken lets an already-authenticated caller mint (or rotate)
-// tokens and returns the plaintext exactly once. Authorized callers:
+// handleCreateToken mints (or rotates) a token and returns the plaintext
+// exactly once. Authorization model:
 //
-//  1. an existing write token or a browser session;
-//  2. the loopback bootstrap: a request arriving directly on 127.0.0.1 with no
-//     Cloudflare headers — the only way in is a root shell on the box, because
-//     tunnel traffic always carries Cf-Connecting-Ip even though cloudflared
-//     itself connects from localhost.
+//   - An existing write token or a valid browser session may rotate either
+//     scope.
+//   - The loopback bootstrap (a request on 127.0.0.1 with no Cloudflare
+//     header, reachable only from a root shell on the box — tunnel traffic
+//     always carries Cf-Connecting-Ip) may seed a scope that is CURRENTLY
+//     EMPTY, so a fresh headless install is scriptable from the start. It can
+//     NOT rotate a scope that already holds a token, so an accidental local
+//     curl can never silently invalidate a live token. To rotate after losing
+//     the write token, clear the settings row in Postgres and re-seed.
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonError(w, http.StatusMethodNotAllowed, "POST only")
-		return
-	}
-	host, _, splitErr := net.SplitHostPort(r.RemoteAddr)
-	direct := splitErr == nil && (host == "127.0.0.1" || host == "::1") && r.Header.Get("Cf-Connecting-Ip") == ""
-	if !direct && s.classify(tokenFromRequest(r)) != scopeWrite && !s.sessionValid(r) {
-		jsonError(w, http.StatusUnauthorized, "write token or browser session required")
 		return
 	}
 	var req struct {
@@ -364,14 +362,31 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "scope must be read or write")
 		return
 	}
+
+	key := settingsKeyWriteToken
+	if scope == "read" {
+		key = settingsKeyReadToken
+	}
+	existing, _ := s.db.GetSetting(key)
+
+	host, _, splitErr := net.SplitHostPort(r.RemoteAddr)
+	direct := splitErr == nil && (host == "127.0.0.1" || host == "::1") && r.Header.Get("Cf-Connecting-Ip") == ""
+	tokenOrSession := s.classify(tokenFromRequest(r)) == scopeWrite || s.sessionValid(r)
+	if !tokenOrSession {
+		if !direct {
+			jsonError(w, http.StatusUnauthorized, "write token or browser session required")
+			return
+		}
+		if existing != "" {
+			jsonError(w, http.StatusForbidden, "scope already has a token; rotation needs the write token or a session")
+			return
+		}
+	}
+
 	token, err := generateToken()
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "could not generate token")
 		return
-	}
-	key := settingsKeyWriteToken
-	if scope == "read" {
-		key = settingsKeyReadToken
 	}
 	if err := s.db.SetSetting(key, hashToken(token)); err != nil {
 		jsonError(w, http.StatusInternalServerError, "could not store token")
