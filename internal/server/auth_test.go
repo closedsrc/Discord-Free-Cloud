@@ -135,3 +135,56 @@ func TestReadRouteClassification(t *testing.T) {
 		t.Error("delete must require write")
 	}
 }
+
+func TestPublicModeParsing(t *testing.T) {
+	cases := map[string]string{
+		"":         publicOff,
+		"off":      publicOff,
+		"nonsense": publicOff,
+		"read":     publicRead,
+		"1":        publicRead,
+		"true":     publicRead,
+		" On ":     publicRead,
+		"full":     publicFull,
+		"write":    publicFull,
+		"all":      publicFull,
+	}
+	for env, want := range cases {
+		t.Setenv("PUBLIC_ACCESS", env)
+		if got := publicMode(); got != want {
+			t.Errorf("PUBLIC_ACCESS=%q -> %q, want %q", env, got, want)
+		}
+	}
+}
+
+func TestAnonymousScopePerMode(t *testing.T) {
+	t.Setenv("PUBLIC_ACCESS", "off")
+	if anonymousScope() != scopeNone {
+		t.Error("off must grant nothing")
+	}
+	t.Setenv("PUBLIC_ACCESS", "read")
+	if anonymousScope() != scopeRead {
+		t.Error("read must grant the read scope")
+	}
+	t.Setenv("PUBLIC_ACCESS", "full")
+	if anonymousScope() != scopeWrite {
+		t.Error("full must grant the write scope")
+	}
+}
+
+// A published drive must stay published for readers and closed for writers: this
+// is the guard that keeps PUBLIC_ACCESS=read from handing out /api/delete.
+func TestRequireAuthPublicReadBlocksWrites(t *testing.T) {
+	t.Setenv("PUBLIC_ACCESS", "read")
+	if anonymousScope() != scopeRead {
+		t.Fatal("precondition: read mode")
+	}
+	if !routeRequiresRead("/api/files/view") {
+		t.Error("browsing must be allowed with the read scope")
+	}
+	for _, p := range []string{"/api/delete", "/api/upload/file", "/api/files/rename", "/api/files/move", "/api/files/trash", "/api/shares/create", "/api/create-token", "/api/bots/add"} {
+		if routeRequiresRead(p) {
+			t.Errorf("%s must require the write scope", p)
+		}
+	}
+}

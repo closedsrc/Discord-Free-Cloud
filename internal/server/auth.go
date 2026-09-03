@@ -61,6 +61,43 @@ func (s *Server) authEnabled() bool {
 	return w != "" || r != ""
 }
 
+// Public access modes, set by PUBLIC_ACCESS. This is how the drive is published
+// without a password prompt; it is a deliberate, reversible choice:
+//
+//	off  (default) every API call needs a token or an unlocked browser session
+//	read anonymous callers get the read scope: browse, preview, download
+//	full anonymous callers get the write scope: uploads, renames and DELETES too
+//
+// "full" means anyone who finds the URL can erase the drive, backups included.
+const (
+	publicOff  = "off"
+	publicRead = "read"
+	publicFull = "full"
+)
+
+func publicMode() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("PUBLIC_ACCESS"))) {
+	case "read", "public", "1", "true", "yes", "on":
+		return publicRead
+	case "full", "write", "all":
+		return publicFull
+	default:
+		return publicOff
+	}
+}
+
+// anonymousScope is the scope handed to a caller with no credential at all.
+func anonymousScope() tokenScope {
+	switch publicMode() {
+	case publicRead:
+		return scopeRead
+	case publicFull:
+		return scopeWrite
+	default:
+		return scopeNone
+	}
+}
+
 // hashToken is the storage form; tokens are random hex so no KDF is needed.
 func hashToken(token string) string {
 	sum := sha256.Sum256([]byte("dfc-api-token:" + token))
@@ -167,11 +204,14 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			scope = scopeWrite // unlocked browser session keeps working
 		}
 		if scope == scopeNone {
+			scope = anonymousScope() // PUBLIC_ACCESS=read|full
+		}
+		if scope == scopeNone {
 			jsonError(w, http.StatusUnauthorized, "missing or invalid API token")
 			return
 		}
 		if !routeRequiresRead(path) && scope != scopeWrite {
-			jsonError(w, http.StatusForbidden, "token is read-only")
+			jsonError(w, http.StatusForbidden, "read-only access")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, scope)))

@@ -79,6 +79,7 @@ const S = {
     status: null, bots: [], servers: [],
     lastUploadFolder: '',
     loading: false,
+    canWrite: true, publicMode: 'off',
 };
 
 // ---------- transfers ----------
@@ -181,14 +182,38 @@ function logLine(msg, cls = '') {
 async function checkAuth() {
     const r = await api('/api/auth/status');
     const d = r.data || {};
+    applyPermissions(d);
     if (!d.auth_required || (d.has_session && d.is_unlocked)) { hideLock(); return true; }
     showLock();
+    return false;
+}
+// The drive can be published read-only (PUBLIC_ACCESS=read): no lock screen, but
+// no write routes either. Hide what would 403 instead of offering dead buttons.
+function applyPermissions(d) {
+    S.publicMode = d.public_mode || 'off';
+    S.canWrite = d.can_write !== false;
+    document.body.classList.toggle('read-only', !S.canWrite);
+    const badge = $('read-only-badge');
+    if (badge) badge.classList.toggle('hidden', S.canWrite);
+    const signIn = $('btn-sign-in');
+    if (signIn) signIn.classList.toggle('hidden', S.canWrite);
+    // The storage plumbing is not part of what gets published: /api/bots needs
+    // write scope, so a visitor would only get a 403 and an empty panel.
+    document.querySelectorAll('[data-view="bots"],[data-view="servers"]')
+        .forEach(b => b.classList.toggle('hidden', !S.canWrite));
+    if (!S.canWrite && (S.view === 'bots' || S.view === 'servers')) switchView('drive');
+}
+function requireWrite() {
+    if (S.canWrite) return true;
+    toast('This drive is published read-only. Unlock with the master password to make changes.', 'error');
     return false;
 }
 function showLock(errMsg) {
     $('lock-overlay').classList.remove('hidden');
     $('lock-error').classList.toggle('hidden', !errMsg);
     if (errMsg) $('lock-error').textContent = errMsg;
+    // when the drive is published there must be a way back out of the lock card
+    $('lock-dismiss').classList.toggle('hidden', S.publicMode === 'off');
     setTimeout(() => $('lock-password').focus(), 60);
 }
 function hideLock() { $('lock-overlay').classList.add('hidden'); }
@@ -205,7 +230,10 @@ async function unlock() {
         r = await api('/api/auth/unlock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) });
     }
     btn.disabled = false; btn.textContent = 'Unlock drive';
-    if (r.ok && r.data.session) { setSession(r.data.session); $('lock-password').value = ''; hideLock(); if (!booted) boot(); else { connectWS(); loadStatus(); switchView('drive'); } }
+    if (r.ok && r.data.session) {
+        setSession(r.data.session); $('lock-password').value = ''; hideLock();
+        if (!booted) boot(); else { connectWS(); loadStatus(); checkAuth(); switchView('drive'); }
+    }
     else { $('lock-error').textContent = r.error || 'Wrong password.'; $('lock-error').classList.remove('hidden'); }
 }
 
@@ -336,10 +364,9 @@ function visibleFiles() { return sortFiles(S.files.filter(passFilter)); }
 function currentFolderId() { return S.parentID || (S.files.find(f => f.is_dir) || {}).parent_id || ''; }
 
 // ---------- icons ----------
-// File types read as a light document sheet with one saturated glyph, the way
-// Drive/Filen do it: colour carries the type, the sheet keeps a listing calm.
-const SHEET = '<path d="M6 2.2h7.1l5.5 5.5v11.7a2.4 2.4 0 0 1-2.4 2.4H6a2.4 2.4 0 0 1-2.4-2.4V4.6A2.4 2.4 0 0 1 6 2.2z" fill="#e8eaee"/><path d="M13.1 2.2l5.5 5.5h-5.5z" fill="#b7bcc4"/>';
-const AMBER_SHEET = '<path d="M6 2.2h7.1l5.5 5.5v11.7a2.4 2.4 0 0 1-2.4 2.4H6a2.4 2.4 0 0 1-2.4-2.4V4.6A2.4 2.4 0 0 1 6 2.2z" fill="#f5b425"/><path d="M13.1 2.2l5.5 5.5h-5.5z" fill="#c98d13"/>';
+// A grey document sheet carries one saturated glyph or badge, the way Filen and
+// Drive do it: the colour names the type, the sheet keeps a dense listing calm.
+const SHEET = '<path d="M6 2.2h7.1l5.5 5.5v11.7a2.4 2.4 0 0 1-2.4 2.4H6a2.4 2.4 0 0 1-2.4-2.4V4.6A2.4 2.4 0 0 1 6 2.2z" fill="#aab2bd"/><path d="M13.1 2.2l5.5 5.5h-5.5z" fill="#7f8895"/>';
 const sheetIcon = (glyph, base) => `<svg viewBox="0 0 24 24" fill="none">${base || SHEET}${glyph}</svg>`;
 const label = (text, fill) =>
     `<rect x="4.4" y="12.1" width="13.2" height="6.6" rx="1.5" fill="${fill}"/>` +
@@ -354,11 +381,11 @@ const ICON = {
     doc: sheetIcon(label('DOC', '#2f7ff5')),
     sheetdoc: sheetIcon(label('XLS', '#15a35b')),
     slides: sheetIcon(label('PPT', '#e2711d')),
-    archive: sheetIcon('<path d="M11 3.4v3.1M11 8.1v2M11 11.7v2M11 15.3v2.2" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/><circle cx="11" cy="19.1" r="1.5" fill="#fff"/>', AMBER_SHEET),
-    app: sheetIcon('<circle cx="11" cy="15.4" r="2.1" stroke="#8b95a1" stroke-width="1.5"/><path d="M11 11.3v1M11 19.5v1M7.3 13.3l.9.5M13.8 17l.9.5M7.3 17.5l.9-.5M13.8 13.8l.9-.5" stroke="#8b95a1" stroke-width="1.4" stroke-linecap="round"/>'),
+    archive: sheetIcon('<path d="M11 2.6v3.1M11 7.4v2M11 11v2M11 14.6v2.2" stroke="#f5a524" stroke-width="1.8" stroke-linecap="round"/><circle cx="11" cy="18.6" r="1.7" fill="#f5a524"/>'),
+    app: sheetIcon('<circle cx="11" cy="15.4" r="2.1" stroke="#64748b" stroke-width="1.5"/><path d="M11 11.3v1M11 19.5v1M7.3 13.3l.9.5M13.8 17l.9.5M7.3 17.5l.9-.5M13.8 13.8l.9-.5" stroke="#64748b" stroke-width="1.4" stroke-linecap="round"/>'),
     apk: sheetIcon('<path d="M6.4 17.6a4.6 4.6 0 0 1 9.2 0z" fill="#3ddc84"/><path d="M7.8 12.4l1 1.7M14.2 12.4l-1 1.7" stroke="#3ddc84" stroke-width="1.4" stroke-linecap="round"/><path d="M6.2 18.6h9.6" stroke="#3ddc84" stroke-width="1.5" stroke-linecap="round"/>'),
-    code: sheetIcon('<path d="M9.2 12.9l-2.3 2.6 2.3 2.6M12.8 12.9l2.3 2.6-2.3 2.6" stroke="#6b8afd" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'),
-    text: sheetIcon('<path d="M6.7 12.7h8.6M6.7 15.5h8.6M6.7 18.3h5.4" stroke="#98a0aa" stroke-width="1.5" stroke-linecap="round"/>'),
+    code: sheetIcon('<path d="M9.2 12.9l-2.3 2.6 2.3 2.6M12.8 12.9l2.3 2.6-2.3 2.6" stroke="#4f6ef7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'),
+    text: sheetIcon('<path d="M6.7 12.7h8.6M6.7 15.5h8.6M6.7 18.3h5.4" stroke="#5c6672" stroke-width="1.5" stroke-linecap="round"/>'),
     other: sheetIcon(''),
 };
 ICON.dir = ICON.folder;
@@ -448,7 +475,7 @@ function renderGrid(files) {
             <span class="fc-check${S.selected.has(f.id) ? ' on' : ''}">✓</span>
             <button class="fc-menu" aria-label="More">⋮</button>
             ${st !== 'ok' && st !== 'folder' ? `<span class="fc-badge badge-${st === 'processing' ? 'processing' : 'error'}">${st === 'processing' ? 'PARTIAL' : 'INCOMPLETE'}</span>` : ''}
-            <div class="fc-body">
+            <div class="fc-pill">
                 <span class="fc-name" title="${esc(f.name)}">${esc(f.name)}${f.favorite ? ' <span class="fav-star">♥</span>' : ''}</span>
                 <span class="fc-meta">${f.is_dir ? 'Folder' : fmtBytes(f.size) + ' · ' + fmtDateShort(f.mod_time)}</span>
             </div>`;
@@ -555,18 +582,20 @@ function openFileMenu(f, rect) {
     if (!f.is_dir) {
         items.push(['Preview', ACT.preview, () => openPreview(f.id)]);
         items.push(['Download', ACT.download, () => dl(f)]);
-        if (!inTrash) items.push(['Copy share link', ACT.link, () => copyLink(f)]);
+        if (!inTrash && S.canWrite) items.push(['Copy share link', ACT.link, () => copyLink(f)]);
+        if (!f.is_dir) items.push(['File details', ACT.info, () => openPreview(f.id, true)]);
     }
-    if (!inTrash) {
+    if (!inTrash && S.canWrite) {
         items.push(['Rename', ACT.rename, () => renameItem(f)]);
         items.push(['Move to…', ACT.move, () => moveItem(f)]);
         items.push([f.favorite ? 'Remove from favorites' : 'Add to favorites', ACT.heart, () => favoriteItem(f, !f.favorite)]);
-        if (!f.is_dir) items.push(['File details', ACT.info, () => openPreview(f.id, true)]);
     }
-    items.push(['sep']);
-    if (inTrash) items.push(['Restore', ACT.restore, () => trashRestore([f.id]), true]);
-    else items.push(['Move to trash', ACT.trash, () => trashMove([f.id]), true]);
-    items.push(['Delete forever', ACT.x, () => deleteForever([f.id]), true]);
+    if (S.canWrite) {
+        items.push(['sep']);
+        if (inTrash) items.push(['Restore', ACT.restore, () => trashRestore([f.id]), true]);
+        else items.push(['Move to trash', ACT.trash, () => trashMove([f.id]), true]);
+        items.push(['Delete forever', ACT.x, () => deleteForever([f.id]), true]);
+    }
     for (const it of items) {
         if (it[0] === 'sep') { const s = document.createElement('div'); s.className = 'ctx-sep'; menu.appendChild(s); continue; }
         const b = document.createElement('button'); b.className = 'ctx-item' + (it[3] ? ' danger' : '');
@@ -632,9 +661,10 @@ async function loadTrash() {
         card.className = 'file-card' + (thumbable(f) ? ' bleed' : '');
         card.innerHTML = `${thumbHTML(f)}
             <button class="fc-menu" aria-label="More">⋮</button>
-            <div class="fc-body"><span class="fc-name" title="${esc(f.name)}">${esc(f.name)}</span>
+            <div class="fc-pill"><span class="fc-name" title="${esc(f.name)}">${esc(f.name)}</span>
             <span class="fc-meta">${f.is_dir ? 'Folder' : fmtBytes(f.size)}</span></div>`;
-        const t = card.querySelector('.fc-thumb'); if (t) thumbObserver.observe(t);        const restore = () => trashRestore([f.id]).then(loadTrash);
+        const t = card.querySelector('.fc-thumb'); if (t) thumbObserver.observe(t);
+        const restore = () => trashRestore([f.id]).then(loadTrash);
         card.addEventListener('click', () => {
             const menu = document.createElement('div'); menu.className = 'ctx-menu';
             const mk = (label, fn, danger) => { const b = document.createElement('button'); b.className = 'ctx-item' + (danger ? ' danger' : ''); b.textContent = label; b.onclick = () => { menu.remove(); fn(); }; menu.appendChild(b); };
@@ -727,11 +757,14 @@ async function openPreview(id, openInfo) {
     $('pm-name').textContent = known ? known.name : 'Loading…';
     $('pm-size').textContent = known && !known.is_dir ? fmtBytes(known.size) : '';
     $('pm-stage').innerHTML = '<div class="pm-loading"><span class="spinner"></span>Opening…</div>';
-    $('pm-details-list').innerHTML = ''; $('pm-health-list').innerHTML = ''; $('pm-shares').innerHTML = '';
+    $('pm-details-list').innerHTML = ''; $('pm-health-list').innerHTML = '';
+    // never leave the SHARES heading standing over nothing while the list loads
+    $('pm-shares').innerHTML = '<div class="pm-empty">Loading…</div>';
     document.querySelectorAll('.pm-zoom-control,.pm-zoom-value,.pm-fit').forEach(el => el.classList.add('hidden'));
     previewPan = { x: 0, y: 0 }; previewZoom = 1;
     modal.classList.remove('hidden');
     if (openInfo) toggleInfo(true);
+    loadSharesInto(id); // in flight alongside the details request, not after it
     const r = await api('/api/files/details?file_id=' + encodeURIComponent(id));
     if (previewFor !== id || modal.classList.contains('hidden')) return; // moved on already
     if (!r.ok) { closePreview(); return toast(r.error || 'Not found', 'error'); }
@@ -829,11 +862,13 @@ function renderDetails(f) {
         } else box.innerHTML = `<div class="verify-result fail">${esc(r.error || 'verify failed')}</div>`;
     };
     h.appendChild(vr);
-    $('pm-shares').innerHTML = '';
 }
 async function loadSharesInto(id) {
     const r = await api('/api/shares/list?file_id=' + encodeURIComponent(id));
-    const box = $('pm-shares'); if (!box) return; box.innerHTML = '';
+    const box = $('pm-shares');
+    if (!box || previewFor !== id) return; // a later file already owns the panel
+    box.innerHTML = '';
+    if (!r.ok) { box.innerHTML = '<div class="pm-empty">Links unavailable.</div>'; return; }
     const shares = (r.data && r.data.shares) || [];
     if (!shares.length) { box.innerHTML = '<div class="pm-empty">No active links.</div>'; return; }
     for (const sh of shares) {
@@ -961,12 +996,14 @@ function confirmBox(title, msg, danger) {
 
 // ---------- creation / upload ----------
 async function createFolder() {
+    if (!requireWrite()) return;
     const name = await showInput('New folder', '');
     if (!name) return;
     const r = await api('/api/folders/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, parent_id: S.parentID }) });
     if (r.ok) { toast('Folder created', 'success'); flashFile((r.data.folder || {}).id); reloadCurrent(); } else toast(r.error, 'error');
 }
 async function createTextFile() {
+    if (!requireWrite()) return;
     const name = await showInput('New text file', 'untitled.txt');
     if (!name) return;
     const content = await showInput('Content of ' + name, '');
@@ -985,7 +1022,7 @@ async function uploadOne(file, parentId) {
         saveTransfers(); renderTransfers();
     } else toast('Upload failed: ' + r.error, 'error');
 }
-async function uploadFiles(files) { if (!files.length) return; await ensureParentForUpload(); for (const f of files) await uploadOne(f, S.parentID); }
+async function uploadFiles(files) { if (!files.length || !requireWrite()) return; await ensureParentForUpload(); for (const f of files) await uploadOne(f, S.parentID); }
 async function uploadDirectory(fileList) {
     await ensureParentForUpload();
     const files = [...fileList];
@@ -1049,12 +1086,13 @@ document.addEventListener('change', e => {
     if (e.target.id === 'sort-select') { const [k, d] = e.target.value.split('-'); S.sortKey = k; S.sortDir = d; render(); }
 });
 let dragDepth = 0;
-document.addEventListener('dragenter', e => { if (e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) { dragDepth++; $('drop-overlay').classList.remove('hidden'); } });
+document.addEventListener('dragenter', e => { if (S.canWrite && e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) { dragDepth++; $('drop-overlay').classList.remove('hidden'); } });
 document.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('drop-overlay').classList.add('hidden'); } });
 document.addEventListener('dragover', e => e.preventDefault());
 document.addEventListener('drop', e => {
     if (!e.dataTransfer || ![...(e.dataTransfer.types || [])].includes('Files')) return;
     e.preventDefault(); dragDepth = 0; $('drop-overlay').classList.add('hidden');
+    if (!requireWrite()) return;
     uploadDataTransfer(e.dataTransfer);
 });
 
@@ -1207,6 +1245,8 @@ function wireUI() {
         $('log-drawer').classList.add('open'); $('drawer-scrim').classList.remove('hidden');
     });
     $('btn-settings').addEventListener('click', () => switchView('settings'));
+    $('btn-sign-in').addEventListener('click', () => showLock());
+    $('lock-dismiss').addEventListener('click', () => { $('lock-password').value = ''; hideLock(); });
     $('btn-mobile-menu').addEventListener('click', () => document.body.classList.toggle('nav-open'));
     $('sidebar-scrim').addEventListener('click', () => document.body.classList.remove('nav-open'));
     $('btn-unlock').addEventListener('click', unlock);
@@ -1257,13 +1297,17 @@ function wireUI() {
     $('btn-open-diagnostics').addEventListener('click', () => { $('log-drawer').classList.add('open'); $('drawer-scrim').classList.remove('hidden'); });
     $('btn-close-log').addEventListener('click', () => { $('log-drawer').classList.remove('open'); $('drawer-scrim').classList.add('hidden'); });
     $('drawer-scrim').addEventListener('click', () => { $('log-drawer').classList.remove('open'); $('drawer-scrim').classList.add('hidden'); });
-    if (S.layout === 'list') { $('btn-list').classList.add('active'); $('btn-grid').classList.remove('active'); }
+    // show only the control that switches to the other mode, from the first paint
+    $('btn-grid').classList.toggle('hidden', S.layout === 'grid');
+    $('btn-list').classList.toggle('hidden', S.layout !== 'grid');
     updateSortHeads();
     toggleDrawer(false);
 }
 function setLayout(l) {
     S.layout = l; localStorage.setItem('dfc_layout', l);
-    $('btn-grid').classList.toggle('active', l === 'grid'); $('btn-list').classList.toggle('active', l === 'list');
+    // one control, like Filen: show the button for the mode you are NOT in
+    $('btn-grid').classList.toggle('hidden', l === 'grid');
+    $('btn-list').classList.toggle('hidden', l !== 'grid');
     render();
 }
 function updateSortHeads() {
@@ -1277,7 +1321,9 @@ async function boot() {
     connectWS();
     await loadStatus();
     switchView('drive');
-    loadBots(); loadServers(); loadStatus();
+    // /api/bots needs write scope; a published visitor would only collect a 403
+    if (S.canWrite) { loadBots(); loadServers(); }
+    loadStatus();
     reconcileJobs();
     setInterval(loadStatus, 60000);
     logLine('drive unlocked — engine ready', 'ok');

@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=4016">
+    <link rel="stylesheet" href="style.css?v=4025">
 </head>
 <body class="theme-dark">
 <div class="app">
@@ -105,6 +105,8 @@
                 <h1 id="page-title">Cloud Drive</h1>
                 <div class="crumbs" id="breadcrumb-bar"></div>
             </div>
+            <span class="ro-badge hidden" id="read-only-badge" title="Published read-only — sign in with the master password to make changes">Read-only</span>
+            <button class="btn-signin hidden" id="btn-sign-in" title="Sign in with the master password">Sign in</button>
             <div class="tb-right">
                 <div class="searchbox">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7.5"/><path d="M21 21l-4.3-4.3"/></svg>
@@ -321,6 +323,7 @@
         <p>Encrypted storage backed by Discord. Enter your master password to derive the key and unlock the drive.</p>
         <input type="password" id="lock-password" placeholder="Master password" autocomplete="current-password">
         <button class="btn-primary btn-block" id="btn-unlock">Unlock drive</button>
+        <button class="lock-dismiss hidden" id="lock-dismiss">Browse without signing in</button>
         <p class="lock-error hidden" id="lock-error"></p>
     </div>
 </div>
@@ -330,6 +333,6 @@
 <input type="file" id="file-input" multiple hidden>
 <input type="file" id="dir-input" webkitdirectory directory multiple hidden>
 
-<script src="app.js?v=4016"></script>
+<script src="app.js?v=4025"></script>
 </body>
 </html>

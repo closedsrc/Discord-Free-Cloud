@@ -43,6 +43,9 @@ svg{display:block;flex:none}
 .rail-btn svg{width:20px;height:20px}
 .rail-btn:hover{background:var(--surface);color:var(--text)}
 .rail-btn.active{background:var(--surface-2);color:var(--text)}
+/* the two infra buttons are also .nav-button (sidebar rows), whose left-aligned
+   flex layout would drag their glyphs off the rail's centre line */
+.rail .nav-button{width:38px;height:38px;padding:0;gap:0;justify-content:center}
 .rail-dot{position:absolute;top:7px;right:7px;width:7px;height:7px;border-radius:50%;background:var(--blue);box-shadow:0 0 0 2px var(--rail)}
 
 /* ---------- sidebar ---------- */
@@ -137,7 +140,7 @@ svg{display:block;flex:none}
     font-size:13.5px;font-weight:500;letter-spacing:-.008em;transition:background .14s;
 }
 .btn-new:hover{background:#e6e7e9}
-.vtoggle{display:flex;align-items:center;gap:2px}
+.vtoggle{display:flex;align-items:center}
 .vt-btn{width:32px;height:32px;border-radius:7px;color:var(--text-3);display:grid;place-items:center;transition:background .12s,color .12s}
 .vt-btn:hover{background:var(--surface);color:var(--text-2)}
 .vt-btn.active{background:var(--surface-2);color:var(--text)}
@@ -161,8 +164,36 @@ svg{display:block;flex:none}
     background:var(--surface-2);border-radius:6px;padding:4px 6px;text-overflow:ellipsis;
 }
 
-/* ---------- panels ---------- */
-.view-panel{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
+/* ---------- read-only publication ---------- */
+/* PUBLIC_ACCESS=read: no lock screen, but every write route 403s, so the
+   affordances that would fail are removed rather than left to fail. */
+.ro-badge{
+    flex:none;padding:3px 8px;border-radius:6px;font-size:11px;letter-spacing:.02em;
+    color:#e0a35c;background:rgba(245,165,36,.12);border:1px solid rgba(245,165,36,.28);
+}
+.btn-signin{
+    flex:none;height:30px;padding:0 12px;border-radius:8px;font-size:12.5px;
+    color:var(--text-2);background:var(--surface-2);border:1px solid var(--line);
+}
+.btn-signin:hover{background:var(--surface-3);color:var(--text)}
+.btn-signin.hidden{display:none}
+.lock-dismiss{
+    display:block;width:100%;margin-top:11px;padding:7px;border-radius:8px;
+    font-size:12.5px;color:var(--text-3);
+}
+.lock-dismiss:hover{background:var(--surface-2);color:var(--text-2)}
+.lock-dismiss.hidden{display:none}
+body.read-only .btn-new,
+body.read-only #batch-bar,
+body.read-only .fc-check,
+body.read-only .c-check,
+body.read-only .file-row .tc,
+body.read-only #pm-favorite,
+body.read-only #pm-share,
+body.read-only #btn-empty-trash,
+body.read-only #view-settings .card:first-child{display:none}
+
+/* ---------- panels ---------- */.view-panel{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
 .content-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden}
 .sub-toolbar{height:44px;flex:none;display:flex;align-items:center;gap:12px;padding:0 24px}
 .sub-count{font-size:13px;color:var(--text-3)}
@@ -188,7 +219,10 @@ svg{display:block;flex:none}
 .c-menu{width:52px;padding-right:16px!important}
 .th-sort{cursor:pointer;user-select:none}
 .th-sort:hover{color:var(--text-2)}
-.sort-arrow{display:inline-block;margin-left:5px;font-size:10px;color:var(--text-3);vertical-align:1px}
+/* the slot only takes space when a glyph is actually in it, so an unsorted
+   header stays flush with the values beneath it */
+.sort-arrow{display:inline-block;margin-left:0;font-size:10px;color:var(--text-3);vertical-align:1px}
+.th-sort.asc .sort-arrow,.th-sort.desc .sort-arrow{margin-left:5px}
 .th-sort.asc .sort-arrow::after{content:"↑"}
 .th-sort.desc .sort-arrow::after{content:"↓"}
 .ftable tbody td{padding:0;border:0;height:var(--row);vertical-align:middle}
@@ -264,24 +298,28 @@ svg{display:block;flex:none}
 .file-card:hover{background:#1a1c1f;border-color:#292c30}
 .file-card.selected{border-color:var(--blue);background:rgba(47,127,245,.09)}
 .fc-thumb{
-    position:relative;height:128px;display:grid;place-items:center;background:#101214;
-    color:var(--text-4);border-bottom:1px solid var(--line);overflow:hidden;
+    position:relative;height:172px;display:grid;place-items:center;background:#101214;
+    color:var(--text-4);overflow:hidden;
 }
-.fc-type-icon{width:52px;height:52px;display:grid;place-items:center}
-.fc-type-icon svg{width:52px;height:52px}
+.fc-type-icon{width:58px;height:58px;display:grid;place-items:center}
+.fc-type-icon svg{width:58px;height:58px}
 .fc-thumb img{
     position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;
     opacity:0;transition:opacity .22s ease-out;
 }
 .fc-thumb img.on{opacity:1}
-/* image tiles read as the picture itself — no divider under a full-bleed crop */
-.file-card.bleed .fc-thumb{background:#0d0f11;border-bottom-color:transparent}
-.file-card.bleed .fc-body{padding-top:8px}
+.file-card.bleed .fc-thumb{background:#0d0f11}
 
 .fc-thumb .fc-type-icon:not([class*="k-"]){color:var(--text-3)}
-.fc-body{padding:9px 11px 11px;display:flex;flex-direction:column;gap:3px;min-width:0}
-.fc-name{font-size:13.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.fc-meta{font-size:11.5px;color:var(--text-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* the name rides in a pill over the tile, so the preview owns the whole card.
+   Opaque on purpose: a translucent chip picks up whatever colour is under it. */
+.fc-pill{
+    position:absolute;left:8px;right:8px;bottom:8px;z-index:2;padding:6px 9px 7px;
+    border-radius:8px;background:#101215;border:1px solid #23262b;
+    display:flex;flex-direction:column;gap:1px;min-width:0;
+}
+.fc-name{font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fc-meta{font-size:11px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fc-check{
     position:absolute;top:8px;left:8px;width:17px;height:17px;border-radius:5px;
     border:1.5px solid rgba(255,255,255,.3);background:rgba(10,11,12,.6);color:transparent;
@@ -368,9 +406,11 @@ svg{display:block;flex:none}
 .warn-note{color:#e0a35c!important}
 .field-row{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:9px}
 .field-row input{
-    flex:1;min-width:180px;height:36px;padding:0 12px;border-radius:var(--radius);
-    background:#101214;border:1px solid var(--line);font-size:13.5px;color:var(--text);
+    flex:1 1 180px;min-width:0;height:36px;padding:0 12px;border-radius:var(--radius);
+    background:#101214;border:1px solid #2a2d31;font-size:13.5px;color:var(--text);
 }
+/* the action must keep its width instead of landing on top of the last field */
+.field-row .btn-primary,.field-row .btn-ghost,.field-row .btn-secondary{flex:none}
 .field-row input:focus{border-color:#33363b}
 .field-row input::placeholder{color:var(--text-4)}
 .token-output{
@@ -646,9 +686,11 @@ svg{display:block;flex:none}
        phone — per-file actions live in the row menu there */
     .c-check,.file-row .tc{display:none}
     .topbar{height:auto;flex-wrap:wrap;padding:10px 14px;gap:10px}
+    /* wrapped bar: title leads, then the state chips, then the controls row */
+    .tb-titles{flex:1;order:1}
+    .ro-badge,.btn-signin{order:2}
     .tb-right{width:100%;margin-left:0;order:3}
     .searchbox{flex:1}
-    .tb-titles{flex:1;order:2}
     .fr-name{padding-left:14px}
     .ftable thead th.c-name{padding-left:14px}
     .ftable thead th{font-size:12px}
@@ -663,7 +705,6 @@ svg{display:block;flex:none}
 @media (max-width:560px){
     .tb-right{gap:7px}
     .btn-new{padding:0 13px}
-    .vtoggle{display:none}
     .c-size{width:86px}
     .fr-size{font-size:13px}
     .batch-bar{left:12px;right:12px;transform:none;bottom:12px;flex-wrap:wrap}

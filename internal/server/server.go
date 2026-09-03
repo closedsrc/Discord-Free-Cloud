@@ -2072,12 +2072,27 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	passHash, _ := s.db.GetSetting("master_pass_hash")
 	isUnlocked := s.uploader.HasMasterKey()
 
+	// The dashboard needs three separate facts: whether it must show the lock
+	// screen at all, what an anonymous visitor is allowed to do, and whether THIS
+	// caller may write (so read-only visitors are not offered buttons that 403).
+	mode := publicMode()
+	session := s.sessionValid(r)
+	scope := s.classify(tokenFromRequest(r))
+	if scope == scopeNone && session {
+		scope = scopeWrite
+	}
+	if scope == scopeNone {
+		scope = anonymousScope()
+	}
+
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"ok":            true,
 		"has_password":  passHash != "",
 		"is_unlocked":   isUnlocked,
-		"auth_required": s.authEnabled() && !s.sessionValid(r),
-		"has_session":   s.sessionValid(r),
+		"auth_required": s.authEnabled() && !session && mode == publicOff,
+		"has_session":   session,
+		"public_mode":   mode,
+		"can_write":     scope == scopeWrite || !s.authEnabled(),
 	})
 }
 
