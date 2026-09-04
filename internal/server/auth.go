@@ -98,6 +98,22 @@ func anonymousScope() tokenScope {
 	}
 }
 
+// signinPasswordMatches reports whether the supplied password is the sign-in
+// password from SIGNIN_PASSWORD.
+//
+// This is an access credential, NOT key material. The encryption key is derived
+// from MASTER_PASSWORD and loaded headlessly at boot; a sign-in password only
+// decides who may drive an already-unlocked service. Keeping the two separate is
+// what makes "change the login password" safe: re-deriving the master key would
+// orphan every chunk already in Discord, backups included.
+func signinPasswordMatches(supplied string) bool {
+	want := strings.TrimSpace(os.Getenv("SIGNIN_PASSWORD"))
+	if want == "" || supplied == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(supplied), []byte(want)) == 1
+}
+
 // hashToken is the storage form; tokens are random hex so no KDF is needed.
 func hashToken(token string) string {
 	sum := sha256.Sum256([]byte("dfc-api-token:" + token))
@@ -194,8 +210,14 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !s.authEnabled() {
-			next.ServeHTTP(w, r)
+
+		// Public mode is applied BEFORE the token-seeded gate. Otherwise
+		// PUBLIC_ACCESS=read would be a no-op on a fresh install that has no API
+		// tokens yet, and the first-run dashboard would silently grant everyone
+		// full write. A configured anonymous scope is authoritative here.
+		anon := anonymousScope()
+		if !s.authEnabled() && anon == scopeNone {
+			next.ServeHTTP(w, r) // first-run dashboard, lock still off
 			return
 		}
 
@@ -204,7 +226,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			scope = scopeWrite // unlocked browser session keeps working
 		}
 		if scope == scopeNone {
-			scope = anonymousScope() // PUBLIC_ACCESS=read|full
+			scope = anon // PUBLIC_ACCESS=read|full
 		}
 		if scope == scopeNone {
 			jsonError(w, http.StatusUnauthorized, "missing or invalid API token")
@@ -216,6 +238,31 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, scope)))
 	})
+}
+
+// principalScope reports whether requireAuth stamped a concrete scope on the
+// request. ok is false for a first-run request, where authEnabled was false and
+// requireAuth passed the caller through without classifying them — that caller
+// has full access, so per-handler write gates must not reject them for lacking a
+// scope header. Only an explicitly scoped-down caller (a read token, or the read
+// public mode) yields ok=true with a non-write scope.
+func principalScope(r *http.Request) (tokenScope, bool) {
+	v := r.Context().Value(principalKey)
+	sc, ok := v.(tokenScope)
+	return sc, ok
+}
+
+// scopeAllowsWrite reports whether the caller behind r may perform a write. It is
+// needed for routes that requireAuth treats as "read" (so a read token or the
+// anonymous read public mode can reach them) but whose POST form mutates the
+// server — e.g. /api/download writing a file to local_dest. A first-run request
+// (no stamped scope) is permitted; an authenticated read scope is denied.
+func scopeAllowsWrite(r *http.Request) bool {
+	sc, stamped := principalScope(r)
+	if !stamped {
+		return true // first-run dashboard, no scope enforced
+	}
+	return sc == scopeWrite
 }
 
 func jsonError(w http.ResponseWriter, code int, msg string) {
@@ -288,6 +335,15 @@ func (s *Server) checkSession(token string) bool {
 	}
 	s.sessions[id] = time.Now().Add(sessionLifetime)
 	return true
+}
+
+// revokeAllSessions drops every browser session. It is called when the master
+// password is replaced: the person who could rotate the key must not have
+// everyone else's already-open write sessions survive the rotation.
+func (s *Server) revokeAllSessions() {
+	s.sessMu.Lock()
+	s.sessions = make(map[string]time.Time)
+	s.sessMu.Unlock()
 }
 
 // issueSession mints a new browser session id and returns the plaintext token

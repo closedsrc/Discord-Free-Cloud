@@ -232,7 +232,15 @@ async function unlock() {
     btn.disabled = false; btn.textContent = 'Unlock drive';
     if (r.ok && r.data.session) {
         setSession(r.data.session); $('lock-password').value = ''; hideLock();
-        if (!booted) boot(); else { connectWS(); loadStatus(); checkAuth(); switchView('drive'); }
+        // A successful unlock always mints a WRITE-scoped session (either the
+        // master password loaded the key, or SIGNIN_PASSWORD matched a drive that
+        // already holds it). Apply write permissions NOW so the published read-only
+        // affordances (Read-only chip, Sign in button, hidden New/upload) clear
+        // immediately — the old code only refreshed them on a RE-unlock, leaving the
+        // first unlock stuck showing read-only chrome. checkAuth then reconciles
+        // against the authoritative status.
+        applyPermissions({ can_write: true, public_mode: S.publicMode, has_session: true, is_unlocked: true });
+        if (!booted) boot(); else { connectWS(); loadStatus(); await checkAuth(); switchView('drive'); }
     }
     else { $('lock-error').textContent = r.error || 'Wrong password.'; $('lock-error').classList.remove('hidden'); }
 }
@@ -333,6 +341,7 @@ async function reloadCurrent() {
     if (q) { params.set('search', q); params.delete('parent_id'); params.delete('view'); }
     S.searchMode = !!q;
     S.loading = true;
+    render();
     const r = await api('/api/files/view' + (params.toString() ? '?' + params : ''));
     if (seq !== loadSeq) return;
     S.files = Array.isArray(r.data) ? r.data : [];
@@ -366,7 +375,8 @@ function currentFolderId() { return S.parentID || (S.files.find(f => f.is_dir) |
 // ---------- icons ----------
 // A grey document sheet carries one saturated glyph or badge, the way Filen and
 // Drive do it: the colour names the type, the sheet keeps a dense listing calm.
-const SHEET = '<path d="M6 2.2h7.1l5.5 5.5v11.7a2.4 2.4 0 0 1-2.4 2.4H6a2.4 2.4 0 0 1-2.4-2.4V4.6A2.4 2.4 0 0 1 6 2.2z" fill="#aab2bd"/><path d="M13.1 2.2l5.5 5.5h-5.5z" fill="#7f8895"/>';
+// #bababa is the sheet body measured off the reference product.
+const SHEET = '<path d="M6 2.2h7.1l5.5 5.5v11.7a2.4 2.4 0 0 1-2.4 2.4H6a2.4 2.4 0 0 1-2.4-2.4V4.6A2.4 2.4 0 0 1 6 2.2z" fill="#bababa"/><path d="M13.1 2.2l5.5 5.5h-5.5z" fill="#8e8e8e"/>';
 const sheetIcon = (glyph, base) => `<svg viewBox="0 0 24 24" fill="none">${base || SHEET}${glyph}</svg>`;
 const label = (text, fill) =>
     `<rect x="4.4" y="12.1" width="13.2" height="6.6" rx="1.5" fill="${fill}"/>` +
@@ -408,18 +418,30 @@ const ACT = {
 };
 
 // ---------- rendering ----------
+function renderSkeletons() {
+    const rows = Array.from({ length: 7 }, () => `<tr class="skeleton-row"><td class="tc"></td><td><div class="skel-row"><span class="skel skel-icon"></span><span class="skel skel-name"></span></div></td><td></td><td><span class="skel skel-size"></span></td><td><span class="skel skel-date"></span></td><td></td></tr>`).join('');
+    $('file-tbody').innerHTML = rows;
+    $('files-grid').innerHTML = Array.from({ length: 8 }, () => '<div class="skel skel-tile"></div>').join('');
+}
 function render() {
     const files = visibleFiles();
-    $('count-label').textContent = files.length + (files.length === 1 ? ' item' : ' items');
-    const isEmpty = files.length === 0;
-    $('empty-state').classList.toggle('hidden', !isEmpty);
-    if (isEmpty) {
+    $('count-label').textContent = S.loading ? 'Loading…' : files.length + (files.length === 1 ? ' item' : ' items');
+    const isLoading = S.loading && (S.view === 'drive' || S.view === 'recents' || S.view === 'favorites');
+    $('empty-state').classList.toggle('hidden', isLoading || files.length !== 0);
+    if (!isLoading && files.length === 0) {
         const searching = $('search-input').value.trim();
         $('empty-title').textContent = searching ? 'Nothing matches your search' : S.view === 'recents' ? 'No recent files' : S.view === 'favorites' ? 'No favorites yet' : 'This folder is empty';
         $('empty-sub').textContent = searching ? 'Try a different term.' : 'Drop files anywhere, or press New → Upload files.';
     }
-    if (S.layout === 'grid') { $('files-grid').classList.remove('hidden'); $('files-table').classList.add('hidden'); renderGrid(files); }
-    else { $('files-grid').classList.add('hidden'); $('files-table').classList.remove('hidden'); renderTable(files); }
+    if (S.layout === 'grid') {
+        $('files-grid').classList.remove('hidden'); $('files-table').classList.add('hidden');
+        if (isLoading) { $('files-grid').innerHTML = Array.from({ length: 8 }, () => '<div class="skel skel-tile"></div>').join(''); }
+        else renderGrid(files);
+    } else {
+        $('files-grid').classList.add('hidden'); $('files-table').classList.remove('hidden');
+        if (isLoading) { renderSkeletons(); }
+        else renderTable(files);
+    }
     updateBatchBar();
 }
 const thumbObserver = new IntersectionObserver(entries => {
@@ -668,8 +690,10 @@ async function loadTrash() {
         card.addEventListener('click', () => {
             const menu = document.createElement('div'); menu.className = 'ctx-menu';
             const mk = (label, fn, danger) => { const b = document.createElement('button'); b.className = 'ctx-item' + (danger ? ' danger' : ''); b.textContent = label; b.onclick = () => { menu.remove(); fn(); }; menu.appendChild(b); };
-            mk('Restore', restore);
-            mk('Delete forever', () => deleteForever([f.id]).then(loadTrash), true);
+            if (S.canWrite) {
+                mk('Restore', restore);
+                mk('Delete forever', () => deleteForever([f.id]).then(loadTrash), true);
+            }
             document.body.appendChild(menu);
             const r = card.getBoundingClientRect();
             menu.style.left = r.left + 'px'; menu.style.top = (r.bottom + 4) + 'px';
@@ -714,9 +738,10 @@ async function loadLinks() {
         div.innerHTML = `<span class="fr-icon">${f.is_dir ? ICON.folder : iconFor(f)}</span><span class="link-name">${esc(f.name)}</span>
             <span class="link-exp">${sh.downloads || 0} dl · ${esc(exp)}${sh.expired ? ' (expired)' : ''}</span>
             <button class="link-copy">Open file</button>
-            <button class="link-revoke" data-i="${esc(sh.id)}">Revoke</button>`;
+            ${S.canWrite ? `<button class="link-revoke" data-i="${esc(sh.id)}">Revoke</button>` : ''}`;
         div.querySelector('.link-copy').onclick = () => openPreview(f.id);
-        div.querySelector('.link-revoke').onclick = async e => {
+        const rev = div.querySelector('.link-revoke');
+        if (rev) rev.onclick = async e => {
             await api('/api/shares/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: e.target.dataset.i }) });
             toast('Link revoked', 'success'); loadLinks();
         };
@@ -873,8 +898,9 @@ async function loadSharesInto(id) {
     if (!shares.length) { box.innerHTML = '<div class="pm-empty">No active links.</div>'; return; }
     for (const sh of shares) {
         const div = document.createElement('div'); div.className = 'share-row';
-        div.innerHTML = `<span>${sh.downloads || 0} dl</span><span class="share-exp">${esc(sh.expires_at ? new Date(sh.expires_at * 1000).toLocaleDateString() : '—')}</span><button class="share-rev" title="Revoke">&times;</button>`;
-        div.querySelector('.share-rev').onclick = async () => { await api('/api/shares/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: sh.id }) }); loadSharesInto(id); };
+        div.innerHTML = `<span>${sh.downloads || 0} dl</span><span class="share-exp">${esc(sh.expires_at ? new Date(sh.expires_at * 1000).toLocaleDateString() : '—')}</span>${S.canWrite ? '<button class="share-rev" title="Revoke">&times;</button>' : ''}`;
+        const rev = div.querySelector('.share-rev');
+        if (rev) rev.onclick = async () => { await api('/api/shares/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: sh.id }) }); loadSharesInto(id); };
         box.appendChild(div);
     }
 }

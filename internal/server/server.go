@@ -814,6 +814,15 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The POST form of /api/download writes to an arbitrary local_dest on the
+	// server. routeRequiresRead lists this path as a "read" route because the GET
+	// streaming form is genuinely read-only, so the path gate cannot tell the two
+	// apart. Enforce write scope here, where the method is known.
+	if !scopeAllowsWrite(r) {
+		jsonError(w, http.StatusForbidden, "local download requires write access")
+		return
+	}
+
 	if ready, reason := s.isStorageReady(); !ready {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": reason})
 		return
@@ -2113,6 +2122,21 @@ func (s *Server) handleAuthUnlock(w http.ResponseWriter, r *http.Request) {
 	passHash, _ := s.db.GetSetting("master_pass_hash")
 	saltHex, _ := s.db.GetSetting("master_salt_hex")
 
+	// A sign-in password authenticates the browser without touching key material.
+	// It only works once the drive already holds its key (headless unlock from
+	// MASTER_PASSWORD at boot); otherwise fall through so the master password —
+	// the only thing that can actually load the key — is what recovers the drive.
+	if signinPasswordMatches(req.Password) && s.uploader.HasMasterKey() {
+		sessionToken, err := s.issueSession()
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		s.setSessionCookie(w, sessionToken)
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "status": "unlocked", "session": sessionToken})
+		return
+	}
+
 	var salt []byte
 	if saltHex != "" {
 		var err error
@@ -2212,6 +2236,11 @@ func (s *Server) handleAuthSetPassword(w http.ResponseWriter, r *http.Request) {
 	s.uploader.SetMasterKey(masterKey)
 	s.downloader.SetMasterKey(masterKey)
 	s.catalog.SetMasterKey(masterKey)
+
+	// A password rotation invalidates every previously minted browser session:
+	// the caller who rotates the key is re-issued a fresh one below, but anyone
+	// else still browsing with a stale write session is forced back to the lock.
+	s.revokeAllSessions()
 
 	sessionToken, err := s.issueSession()
 	if err != nil {

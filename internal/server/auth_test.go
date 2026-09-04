@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -186,5 +187,61 @@ func TestRequireAuthPublicReadBlocksWrites(t *testing.T) {
 		if routeRequiresRead(p) {
 			t.Errorf("%s must require the write scope", p)
 		}
+	}
+}
+
+// routeRequiresRead cannot distinguish the read GET form of /api/download from
+// the write POST form (which writes an arbitrary local_dest). The handler closes
+// that hole with scopeAllowsWrite, which trusts the scope requireAuth stamped on
+// the request: a stamped read scope is denied, a write scope is allowed, and an
+// unstamped (first-run) caller is allowed.
+func TestScopeAllowsWriteEnforcesReadToken(t *testing.T) {
+	reqWith := func(scope tokenScope, stamp bool) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/download", nil)
+		if stamp {
+			r = r.WithContext(context.WithValue(r.Context(), principalKey, scope))
+		}
+		return r
+	}
+	if !scopeAllowsWrite(reqWith(scopeNone, false)) {
+		t.Error("unstamped (first-run) caller must be allowed")
+	}
+	if scopeAllowsWrite(reqWith(scopeRead, true)) {
+		t.Error("read scope must not permit the local-write download")
+	}
+	if !scopeAllowsWrite(reqWith(scopeWrite, true)) {
+		t.Error("write scope must permit the local-write download")
+	}
+}
+
+// Replacing the master password must not leave prior browser sessions alive.
+func TestRevokeAllSessionsDropsEveryone(t *testing.T) {
+	s := newTestServerWithSessions()
+	a, _ := s.issueSession()
+	b, _ := s.issueSession()
+	if !s.checkSession(a) || !s.checkSession(b) {
+		t.Fatal("precondition: both sessions valid")
+	}
+	s.revokeAllSessions()
+	if s.checkSession(a) || s.checkSession(b) {
+		t.Fatal("password rotation must revoke all previously issued sessions")
+	}
+}
+
+// be accepted when empty, and must not be comparable with a prefix.
+func TestSigninPasswordMatches(t *testing.T) {
+	t.Setenv("SIGNIN_PASSWORD", "")
+	if signinPasswordMatches("") || signinPasswordMatches("anything") {
+		t.Error("unset SIGNIN_PASSWORD must accept nothing")
+	}
+	t.Setenv("SIGNIN_PASSWORD", "  unit-access-password  ")
+	if !signinPasswordMatches("unit-access-password") {
+		t.Error("surrounding whitespace in the env value must be trimmed")
+	}
+	if signinPasswordMatches("") {
+		t.Error("an empty attempt must never match")
+	}
+	if signinPasswordMatches("avix") || signinPasswordMatches("avixyy") || signinPasswordMatches("AVIXY") {
+		t.Error("only the exact password may match")
 	}
 }
