@@ -188,6 +188,7 @@ __exports.uploadOne = uploadOne;
 __exports.uploadFiles = uploadFiles;
 __exports.allTransfers = allTransfers;
 __exports.applyTelemetry = applyTelemetry;
+__exports.openPreview = openPreview;
 __exports.kindOf = kindOf;
 __exports.SHEET = SHEET;
 __exports.ICON = ICON;
@@ -346,6 +347,42 @@ async function run() {
   check('the failed upload is marked FAILED', failedXfer && failedXfer.status === 'FAILED', JSON.stringify(failedXfer && failedXfer.status));
   check('the failure carries the server reason', failedXfer && /no storage server/.test(failedXfer.error), JSON.stringify(failedXfer && failedXfer.error));
   check('the user is toasted about the failure', $('toast-stack').children.length > 0, 'toasts=' + $('toast-stack').children.length);
+
+  console.log('\n== text preview passes the session with the URL, like <img> does ==');
+  // A media fetch cannot set a header, so the session travels in the URL
+  // (withSession). The text preview fetched the bare media URL without it and
+  // rendered an empty <pre> for every logged-in user — invisible in every test
+  // that only checks the listing.
+  const previewCalls = [];
+  const realLocalStorageGet = localStorage.getItem.bind(localStorage);
+  localStorage.getItem = k => (k === 'dfc_session' ? 'PREVIEWSESSION' : realLocalStorageGet(k));
+  // Rebind inside the vm context too: app.js closes over the `fetch` the
+  // context was created with, so swapping the host global changes nothing.
+  const ctxFetch = async (url, opts) => {
+    if (typeof url === 'string' && /\/api\/download\/file/.test(url)) previewCalls.push(url);
+    return fakeFetch(url, opts);
+  };
+  ctx.fetch = ctxFetch;
+  globalThis.fetch = ctxFetch;
+  fetchQueue.length = 0;
+  // openPreview reads the file off the current listing first (visibleFiles) and
+  // only falls back to the details response, so the row has to exist for the
+  // text branch to fire.
+  S.files = [{ id: 'txt-1', name: 'note.txt', size: 5, mod_time: 1, is_dir: false, health: 'ok' }];
+  S.view = 'drive'; S.parentID = ''; S.searchMode = false; S.filter = 'all';
+  // openPreview needs the details call + shares call before it fetches the text.
+  // Queue with the query delimiter so the URL-substring matcher cannot grab the
+  // details answer for the shares call (both start with /api/shares- or
+  // /api/files- prefixes that collide halfway).
+  fetchQueue.push({ url: '/api/files/details?file_id=', ok: true, body: { id: 'txt-1', name: 'note.txt', size: 5, mod_time: 1, is_dir: false, chunk_count: 1, attachment_count: 1, replica_servers: 1, parts: [] } });
+  fetchQueue.push({ url: '/api/shares/list?file_id=', ok: true, body: { shares: [] } });
+  await app.openPreview('txt-1');
+  await new Promise(r => setTimeout(r, 10));
+  ctx.fetch = fakeFetch;
+  globalThis.fetch = fakeFetch;
+  localStorage.getItem = realLocalStorageGet;
+  const mediaCall = previewCalls.find(u => u.includes('inline=1'));
+  check('text body is requested with the session in the URL', !!mediaCall && /session=PREVIEWSESSION/.test(mediaCall), JSON.stringify(previewCalls));
 
   console.log('\n== a background refresh must not blank the listing (skeleton flicker) ==');
   // Navigating somewhere new should show skeletons; a refresh of the SAME listing

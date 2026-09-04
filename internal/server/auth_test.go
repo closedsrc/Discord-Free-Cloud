@@ -183,6 +183,12 @@ func TestRequireAuthPublicReadBlocksWrites(t *testing.T) {
 	if !routeRequiresRead("/api/files/view") {
 		t.Error("browsing must be allowed with the read scope")
 	}
+	// /api/shares/list_all is the Links view's single bulk call: it carries file
+	// names, which are metadata a read caller may already list — but it must not
+	// leak token material, and creating shares stays write-only.
+	if !routeRequiresRead("/api/shares/list_all") {
+		t.Error("the bulk share list must be allowed with the read scope")
+	}
 	for _, p := range []string{"/api/delete", "/api/upload/file", "/api/files/rename", "/api/files/move", "/api/files/trash", "/api/shares/create", "/api/create-token", "/api/bots/add"} {
 		if routeRequiresRead(p) {
 			t.Errorf("%s must require the write scope", p)

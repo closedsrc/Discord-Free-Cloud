@@ -216,6 +216,7 @@ func (d *Database) migrate() error {
 	);
 
 	CREATE TABLE IF NOT EXISTS shares (
+		id TEXT DEFAULT '',
 		token_hash TEXT PRIMARY KEY,
 		file_id TEXT NOT NULL,
 		expires_at BIGINT NOT NULL,
@@ -225,6 +226,10 @@ func (d *Database) migrate() error {
 	`
 	if _, err := d.db.Exec(schema); err != nil {
 		return err
+	}
+
+	if err := d.migrateSharesID(); err != nil {
+		return fmt.Errorf("shares id migration: %w", err)
 	}
 
 	// Ensure newer columns exist (idempotent for upgrades).
@@ -518,6 +523,17 @@ func (d *Database) GetFileByPath(path string) (*FileRecord, error) {
 	return &f, nil
 }
 
+// listCols is the column list every file listing selects, in scan order.
+const listCols = `id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at, favorite, trashed_at`
+
+// rootPredicate matches a file that belongs at the drive root: it has no parent,
+// or its parent folder no longer exists (an orphan, which would otherwise be
+// invisible). It MUST stay parenthesised where it is used — SQL binds AND tighter
+// than OR, so `a = ” OR b IS NULL OR c AND trashed_at IS NULL` applies the trash
+// filter to the last branch only, and a trashed root file then shows up in both
+// the drive and the trash at the same time.
+const rootPredicate = `(parent_id = '' OR parent_id IS NULL OR parent_id NOT IN (SELECT id FROM files WHERE is_dir = 1))`
+
 func (d *Database) ListFiles(parentID string) ([]FileRecord, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -525,9 +541,9 @@ func (d *Database) ListFiles(parentID string) ([]FileRecord, error) {
 	var query string
 	var args []any
 	if parentID == "" {
-		query = `SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at, favorite, trashed_at FROM files WHERE parent_id = '' OR parent_id IS NULL OR parent_id NOT IN (SELECT id FROM files WHERE is_dir = 1) AND trashed_at IS NULL ORDER BY is_dir DESC, name ASC`
+		query = `SELECT ` + listCols + ` FROM files WHERE trashed_at IS NULL AND ` + rootPredicate + ` ORDER BY is_dir DESC, name ASC`
 	} else {
-		query = `SELECT id, parent_id, name, path, size, is_dir, mod_time, sha256, mime_type, created_at, favorite, trashed_at FROM files WHERE parent_id = $1 AND trashed_at IS NULL ORDER BY is_dir DESC, name ASC`
+		query = `SELECT ` + listCols + ` FROM files WHERE trashed_at IS NULL AND parent_id = $1 ORDER BY is_dir DESC, name ASC`
 		args = append(args, parentID)
 	}
 

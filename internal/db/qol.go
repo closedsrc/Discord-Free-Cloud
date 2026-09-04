@@ -45,7 +45,11 @@ func (d *Database) SetTrashed(id string, trashed bool) error {
 	if trashed {
 		_, err = d.db.Exec(`UPDATE files SET trashed_at = $1 WHERE id = $2`, time.Now().Unix(), id)
 	} else {
-		_, err = d.db.Exec(`UPDATE files SET trashed_at = NULL WHERE id = $2`, id)
+		// $1, not $2: only one argument is bound here. With $2 the driver reports
+		// "could not determine data type of parameter $1" and restore silently
+		// did nothing — which was invisible while the root listing was also
+		// failing to hide trashed files, because the row appeared to come back.
+		_, err = d.db.Exec(`UPDATE files SET trashed_at = NULL WHERE id = $1`, id)
 	}
 	return err
 }

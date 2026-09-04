@@ -26,3 +26,5 @@ harness/live_shot.js
 harness/upload_probe.js
 harness/feedback_probe.js
 harness/upload_accept.js
+harness/sweep_*.js
+harness/links_probe.js

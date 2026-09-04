@@ -166,6 +166,7 @@ var readOnlyRoutes = map[string]bool{
 	"/api/files/details":   true,
 	"/api/files/raw_chunk": true,
 	"/api/shares/list":     true,
+	"/api/shares/list_all": true,
 	"/api/auth/status":     true,
 }
 

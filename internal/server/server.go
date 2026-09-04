@@ -161,6 +161,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) http.Handler {
 	mux.HandleFunc("/api/create-token", s.handleCreateToken)
 	mux.HandleFunc("/api/shares/create", s.handleShareCreate)
 	mux.HandleFunc("/api/shares/list", s.handleShareList)
+	mux.HandleFunc("/api/shares/list_all", s.handleShareListAll)
 	mux.HandleFunc("/api/shares/revoke", s.handleShareRevoke)
 	mux.HandleFunc("/api/share/", s.handleSharePublic)
 	mux.HandleFunc("/api/verify", s.handleVerifyFile)

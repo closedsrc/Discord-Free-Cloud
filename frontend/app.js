@@ -622,8 +622,15 @@ async function copyLink(f) {
     const r = await api('/api/shares/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_id: f.id }) });
     if (!r.ok) return toast('Could not create link: ' + r.error, 'error');
     const url = r.data.url;
-    try { await navigator.clipboard.writeText(url); toast('Share link copied (7 days)', 'success'); }
-    catch (e) { showInput('Share link', url, false).then(() => {}); }
+    // Refresh whatever is showing the file's links, or the panel keeps claiming
+    // "No active links" for a link that now exists — the viewer's own share list
+    // was loaded before the link was made.
+    if (previewFor === f.id) loadSharesInto(f.id);
+    if (S.view === 'links') loadLinks();
+    // clipboard access needs a permission the browser may refuse (and always
+    // refuses over plain http); fall back to showing the URL to copy by hand
+    try { await navigator.clipboard.writeText(url); toast('Share link copied — valid 7 days', 'success'); }
+    catch (e) { toast('Share link created — valid 7 days', 'success'); showInput('Share link (copy it)', url, false).then(() => {}); }
 }
 function openFileMenu(f, rect) {
     closeMenu();
@@ -742,34 +749,25 @@ document.addEventListener('click', async e => {
 });
 
 // ---------- shared links view ----------
-async function allFilesRecursive() {
-    const out = [];
-    const walk = async pid => {
-        const r = await api('/api/files' + (pid ? '?parent_id=' + encodeURIComponent(pid) : ''));
-        for (const f of (r.data || [])) { out.push(f); if (f.is_dir) await walk(f.id); }
-    };
-    await walk('');
-    return out;
-}
 async function loadLinks() {
     const panel = $('links-panel'); panel.innerHTML = '<div class="xfer-empty">Loading links…</div>';
-    const files = await allFilesRecursive();
-    const rows = [];
-    for (const f of files.filter(x => !x.is_dir)) {
-        const r = await api('/api/shares/list?file_id=' + encodeURIComponent(f.id));
-        if (!r.ok || !r.data.shares) continue;
-        for (const sh of r.data.shares) rows.push({ file: f, share: sh });
-    }
+    // One call, not a per-file fan-out: the old version walked the whole tree
+    // and called /api/shares/list for every file, which meant 2× files requests
+    // and a "Loading links…" that sat for 30s+ on any real library.
+    const r = await api('/api/shares/list_all');
+    if (!r.ok) { panel.innerHTML = '<div class="xfer-empty">Could not load links: ' + esc(r.error || 'error') + '</div>'; return; }
+    const rows = Array.isArray(r.data.shares) ? r.data.shares : [];
     if (!rows.length) { panel.innerHTML = '<div class="xfer-empty">No share links yet.<br>Right-click a file → Copy share link.</div>'; return; }
     panel.innerHTML = '';
-    for (const { file: f, share: sh } of rows) {
+    for (const sh of rows) {
         const div = document.createElement('div'); div.className = 'link-row';
         const exp = sh.expires_at ? new Date(sh.expires_at * 1000).toLocaleString() : 'never';
-        div.innerHTML = `<span class="fr-icon">${f.is_dir ? ICON.folder : iconFor(f)}</span><span class="link-name">${esc(f.name)}</span>
+        const name = sh.file_name || sh.file_id || 'file';
+        div.innerHTML = `<span class="fr-icon">${iconFor({ name, is_dir: false })}</span><span class="link-name">${esc(name)}</span>
             <span class="link-exp">${sh.downloads || 0} dl · ${esc(exp)}${sh.expired ? ' (expired)' : ''}</span>
             <button class="link-copy">Open file</button>
             ${S.canWrite ? `<button class="link-revoke" data-i="${esc(sh.id)}">Revoke</button>` : ''}`;
-        div.querySelector('.link-copy').onclick = () => openPreview(f.id);
+        div.querySelector('.link-copy').onclick = () => openPreview(sh.file_id);
         const rev = div.querySelector('.link-revoke');
         if (rev) rev.onclick = async e => {
             await api('/api/shares/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: e.target.dataset.i }) });
@@ -865,7 +863,12 @@ function renderPreview(f) {
     else if (k === 'pdf') stage.innerHTML = `<iframe src="${media}#toolbar=1"></iframe>`;
     else if (k === 'text' || k === 'code') {
         stage.innerHTML = '<pre>Loading…</pre>';
-        fetch(media).then(r => r.text()).then(t => { stage.querySelector('pre').textContent = t.length > 500000 ? t.slice(0, 500000) + '\n\n… truncated — download for full file' : t; })
+        // The session for a media fetch travels in the URL (withSession), not in
+        // a header — <img>, <video> and fetch-manual URLs alike. So pass it the
+        // same way; without it the response is a 401 and the <pre> shows nothing.
+        fetch(withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1'))
+            .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+            .then(t => { stage.querySelector('pre').textContent = t.length > 500000 ? t.slice(0, 500000) + '\n\n… truncated — download for full file' : t; })
             .catch(() => stage.innerHTML = '<div class="no-preview"><div class="np-icon">⚠</div>Could not load text preview</div>');
     } else {
         stage.innerHTML = `<div class="no-preview"><div class="np-icon">${ICON[k] || ICON.other}</div>${k === 'dir' ? 'Folder — open from the drive.' : 'No inline preview for this type'}<button class="btn-primary btn-sm" id="pm-dl2">Download file</button></div>`;
@@ -1412,7 +1415,14 @@ document.addEventListener('click', async e => {
 
 // ---------- header / menus ----------
 function wireUI() {
-    document.querySelectorAll('.nav-button[data-view]').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
+    document.querySelectorAll('.nav-button[data-view]').forEach(b => b.addEventListener('click', () => {
+        // The sidebar's "Cloud Drive" row is the drive ROOT, so clicking it from
+        // inside a subfolder must go there. switchView deliberately preserves
+        // S.parentID (navigateInto relies on that), which made this row a dead
+        // control three folders deep — the one place a user expects "take me home".
+        if (b.dataset.view === 'drive') { S.parentID = ''; S.parentName = ''; S.trail = []; }
+        switchView(b.dataset.view);
+    }));
     $('nav-activity').addEventListener('click', () => {
         document.body.classList.remove('nav-open');
         $('log-drawer').classList.add('open'); $('drawer-scrim').classList.remove('hidden');

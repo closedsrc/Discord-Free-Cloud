@@ -523,8 +523,16 @@ func (s *Server) handleFileMove(w http.ResponseWriter, r *http.Request) {
 		destPath = dest.Path
 	}
 	newPath := filepath.ToSlash(filepath.Join(destPath, f.Name))
-	if existing, _ := s.db.GetFileByPath(newPath); existing != nil && existing.ID != f.ID {
+	// Prefer the truthful conflicts over a lucky lookup: a stale trashed row
+	// from before the ListFiles precedence fix must not block a move, but the
+	// row being moved must not block itself either.
+	live, _ := s.db.GetFileByPath(newPath)
+	if live != nil && live.ID != f.ID && live.TrashedAt == nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "name already in use in destination"})
+		return
+	}
+	if newPath == f.Path && req.ParentID == f.ParentID {
+		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "status": "noop"})
 		return
 	}
 	if f.IsDir {
