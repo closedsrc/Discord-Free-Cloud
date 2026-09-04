@@ -271,7 +271,7 @@ body.read-only #view-settings .card:first-child{display:none}
     position:relative;width:28px;height:28px;flex:none;border-radius:5px;overflow:hidden;
     display:grid;place-items:center;background:transparent;color:var(--text-3);
 }
-.fr-icon svg{width:22px;height:22px}
+.fr-icon svg{width:24px;height:24px}
 .fr-icon img{
     position:absolute;inset:0;width:28px;height:28px;object-fit:cover;border-radius:5px;
     display:block;opacity:0;transition:opacity .18s ease-out;
@@ -744,6 +744,19 @@ body.read-only #view-settings .card:first-child{display:none}
     /* header must beat `.ftable thead th{text-align:left}` to sit over its values */
     .ftable thead th.c-size,.fr-size{text-align:right;padding-right:14px}
     .c-menu,.fr-menu{padding-right:6px}
+    /* Touch sizing: the desktop bar is 32-34px, which is under the 44px minimum
+       for a finger. Grow the controls a phone actually taps — search field, New,
+       the view toggle, the drawer/menu buttons and the row kebab. */
+    .searchbox{height:44px}
+    .searchbox input{font-size:15px}
+    .btn-new{height:44px;padding:0 20px;font-size:14.5px}
+    .vt-btn{width:44px;height:44px;border-radius:9px}
+    .vt-btn svg{width:19px;height:19px}
+    .menu-btn{width:44px;height:44px;border-radius:9px}
+    .menu-btn svg{width:22px;height:22px}
+    .btn-signin{height:38px;padding:0 14px;font-size:13.5px}
+    .fr-menu{width:40px;height:40px;opacity:1}
+    .fr-menu,.c-menu{width:44px}
     .files-grid{grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:11px;padding:14px}
     /* grid-template now uses flexible 1fr tracks, so the card must fill its track
        rather than keep the desktop fixed --tile width, or narrow phones overflow */

@@ -31,9 +31,17 @@ const fmtBytes = n => {
     while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
     return (i ? parseFloat(n.toFixed(2)) : Math.round(n)) + ' ' + u[i];
 };
+// Modified column. Date.toDateString() + toLocaleTimeString() printed a
+// weekday and seconds ("Thu Sep 03 2026 08:23:06"), which is noise in a dense
+// listing and did not match the short form used on grid cards. One compact
+// format, minute resolution, same month/day/year order as fmtDateShort.
 const fmtDate = ts => {
-    try { const d = new Date(ts * 1000); return d.toDateString() + ' ' + d.toLocaleTimeString('en-GB'); }
-    catch (e) { return '--'; }
+    try {
+        const d = new Date(ts * 1000);
+        if (isNaN(d)) return '--';
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.toDateString().slice(4)}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } catch (e) { return '--'; }
 };
 const fmtDateShort = ts => { try { return new Date(ts * 1000).toDateString().slice(4); } catch (e) { return '--'; } };
 const extOf = name => { const m = /\.([a-z0-9]+)$/i.exec(name || ''); return m ? m[1].toLowerCase() : ''; };
@@ -376,6 +384,11 @@ function currentFolderId() { return S.parentID || (S.files.find(f => f.is_dir) |
 // A grey document sheet carries one saturated glyph or badge, the way Filen and
 // Drive do it: the colour names the type, the sheet keeps a dense listing calm.
 // #bababa is the sheet body measured off the reference product.
+//
+// Every glyph must survive being drawn at 24px in a list row, not just at 64px
+// in a grid tile. Hairline strokes disappear at row size and leave an anonymous
+// grey page, so each type carries a block of saturated colour (a badge, a filled
+// shape, or a heavy stroke) rather than fine linework.
 const SHEET = '<path d="M6 2.2h7.1l5.5 5.5v11.7a2.4 2.4 0 0 1-2.4 2.4H6a2.4 2.4 0 0 1-2.4-2.4V4.6A2.4 2.4 0 0 1 6 2.2z" fill="#bababa"/><path d="M13.1 2.2l5.5 5.5h-5.5z" fill="#8e8e8e"/>';
 const sheetIcon = (glyph, base) => `<svg viewBox="0 0 24 24" fill="none">${base || SHEET}${glyph}</svg>`;
 const label = (text, fill) =>
@@ -384,19 +397,21 @@ const label = (text, fill) =>
 
 const ICON = {
     folder: '<svg viewBox="0 0 24 24" fill="none"><path d="M3 6.4A2.4 2.4 0 0 1 5.4 4h3.8l2.1 2.5h7.3A2.4 2.4 0 0 1 21 8.9v9.1a2.4 2.4 0 0 1-2.4 2.4H5.4A2.4 2.4 0 0 1 3 18z" fill="#3b82f6"/><path d="M3 6.4A2.4 2.4 0 0 1 5.4 4h3.8l2.1 2.5H3z" fill="#60a5fa"/></svg>',
-    image: sheetIcon('<path d="M5.4 17.9l3.4-3.6 2.3 2.4 2.5-2.9 3 4.1z" fill="#38bdf8"/><circle cx="8.1" cy="11.6" r="1.35" fill="#0ea5e9"/>'),
+    image: sheetIcon('<path d="M4.6 18.7l4-4.3 2.6 2.8 2.8-3.3 3.4 4.8z" fill="#38bdf8"/><circle cx="7.9" cy="11.4" r="1.7" fill="#0ea5e9"/>'),
     video: sheetIcon('<rect x="4.6" y="12.2" width="12.8" height="6.4" rx="1.5" fill="#a855f7"/><path d="M9.8 14.1l3.6 1.9-3.6 1.9z" fill="#fff"/>'),
-    audio: sheetIcon('<path d="M9.1 18.2V12.6l5.4-1.1v5.6" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="8" cy="18.3" r="1.5" fill="#22c55e"/><circle cx="14.5" cy="17.1" r="1.5" fill="#22c55e"/>'),
+    audio: sheetIcon('<path d="M8.6 18.6v-6.3l6.4-1.3v6.3" stroke="#22c55e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="7.6" cy="18.4" r="2.1" fill="#22c55e"/><circle cx="15" cy="17.1" r="2.1" fill="#22c55e"/>'),
     pdf: sheetIcon(label('PDF', '#e5484d')),
     doc: sheetIcon(label('DOC', '#2f7ff5')),
     sheetdoc: sheetIcon(label('XLS', '#15a35b')),
     slides: sheetIcon(label('PPT', '#e2711d')),
-    archive: sheetIcon('<path d="M11 2.6v3.1M11 7.4v2M11 11v2M11 14.6v2.2" stroke="#f5a524" stroke-width="1.8" stroke-linecap="round"/><circle cx="11" cy="18.6" r="1.7" fill="#f5a524"/>'),
-    app: sheetIcon('<circle cx="11" cy="15.4" r="2.1" stroke="#64748b" stroke-width="1.5"/><path d="M11 11.3v1M11 19.5v1M7.3 13.3l.9.5M13.8 17l.9.5M7.3 17.5l.9-.5M13.8 13.8l.9-.5" stroke="#64748b" stroke-width="1.4" stroke-linecap="round"/>'),
-    apk: sheetIcon('<path d="M6.4 17.6a4.6 4.6 0 0 1 9.2 0z" fill="#3ddc84"/><path d="M7.8 12.4l1 1.7M14.2 12.4l-1 1.7" stroke="#3ddc84" stroke-width="1.4" stroke-linecap="round"/><path d="M6.2 18.6h9.6" stroke="#3ddc84" stroke-width="1.5" stroke-linecap="round"/>'),
-    code: sheetIcon('<path d="M9.2 12.9l-2.3 2.6 2.3 2.6M12.8 12.9l2.3 2.6-2.3 2.6" stroke="#4f6ef7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>'),
-    text: sheetIcon('<path d="M6.7 12.7h8.6M6.7 15.5h8.6M6.7 18.3h5.4" stroke="#5c6672" stroke-width="1.5" stroke-linecap="round"/>'),
-    other: sheetIcon(''),
+    // a solid amber zipper reads as "archive" at 24px; the old dashed hairline
+    // and dot vanished into the grey sheet at row size
+    archive: sheetIcon('<rect x="8.9" y="2.4" width="4.2" height="12.4" rx="1" fill="#f5a524"/><path d="M8.9 5.6h4.2M8.9 8.1h4.2M8.9 10.6h4.2M8.9 13.1h4.2" stroke="#bababa" stroke-width="1.1"/><rect x="7.9" y="14.4" width="6.2" height="5.4" rx="1.6" fill="#f5a524"/><rect x="10.2" y="16" width="1.6" height="2.4" rx=".8" fill="#8a5b12"/>'),
+    app: sheetIcon('<circle cx="11" cy="15.6" r="3.1" fill="#64748b"/><circle cx="11" cy="15.6" r="1.2" fill="#bababa"/><path d="M11 10.6v1.9M11 18.7v1.9M6.6 13.1l1.7 1M13.7 17.1l1.7 1M6.6 18.1l1.7-1M13.7 14.1l1.7-1" stroke="#64748b" stroke-width="2.1" stroke-linecap="round"/>'),
+    apk: sheetIcon('<path d="M6.2 18.2a4.8 4.8 0 0 1 9.6 0z" fill="#3ddc84"/><path d="M7.5 12.1l1.2 2M14.5 12.1l-1.2 2" stroke="#3ddc84" stroke-width="2.1" stroke-linecap="round"/><rect x="5.6" y="19" width="10.8" height="2.1" rx="1.05" fill="#3ddc84"/>'),
+    code: sheetIcon('<path d="M9.1 12.6l-2.6 2.9 2.6 2.9M12.9 12.6l2.6 2.9-2.6 2.9" stroke="#4f6ef7" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>'),
+    text: sheetIcon('<path d="M6.6 12.6h8.8M6.6 15.5h8.8M6.6 18.4h5.6" stroke="#71717a" stroke-width="2.2" stroke-linecap="round"/>'),
+    other: sheetIcon('<rect x="5.6" y="13.4" width="10.8" height="2.2" rx="1.1" fill="#8e8e8e"/><rect x="5.6" y="17" width="7.2" height="2.2" rx="1.1" fill="#8e8e8e"/>'),
 };
 ICON.dir = ICON.folder;
 const iconFor = f => ICON[kindOf(f)] || ICON.other;
