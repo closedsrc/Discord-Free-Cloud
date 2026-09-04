@@ -28,3 +28,4 @@ harness/feedback_probe.js
 harness/upload_accept.js
 harness/sweep_*.js
 harness/links_probe.js
+harness/txt_debug.js
