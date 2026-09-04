@@ -1,4 +1,4 @@
-/* Discord Free Cloud — drive UI. Vanilla JS, no build step.
+/* Otherworld Drive — file manager UI. Vanilla JS, no build step.
    Backend contracts: /api/files/view, /api/files/batch, /api/files/{rename,move,favorite,trash,restore,details,raw_chunk},
    /api/upload/file, /api/folders/create, /api/files/create_text, /api/download/file?inline=1,
    /api/shares/{create,list,revoke}, /api/verify, /api/jobs, /api/jobs/cancel, /ws, /api/auth/* */
@@ -56,7 +56,6 @@ const DOC_EXT = new Set(['doc','docx','odt','rtf','pages']);
 const XLS_EXT = new Set(['xls','xlsx','ods','csv','tsv','numbers']);
 const PPT_EXT = new Set(['ppt','pptx','odp','key']);
 const CODE_FAM = new Set(['js','ts','jsx','tsx','mjs','css','scss','html','htm','go','py','rb','rs','java','kt','c','h','cpp','hpp','cs','php','lua','swift','r','pl','sql','json','xml','yml','yaml','sh','bash','ps1','dockerfile']);
-const isImage = f => IMAGE_EXT.has(extOf(f.name));
 const kindOf = f => {
     if (f.is_dir) return 'dir';
     const e = extOf(f.name);
@@ -77,14 +76,14 @@ const kindOf = f => {
 
 // ---------- state ----------
 const S = {
-    view: 'drive',              // drive | recents | favorites | links | trash | transfers | bots | servers | settings
+    view: 'drive',              // drive | recents | favorites | links | trash | transfers | bots | settings
     parentID: '', parentName: '',
     trail: [],                  // breadcrumb path [{id,name}]
     files: [], trash: [],
     filter: 'all', sortKey: 'name', sortDir: 'asc',
     layout: localStorage.getItem('dfc_layout') || 'list',
     selected: new Set(),
-    status: null, bots: [], servers: [],
+    status: null, bots: [],
     lastUploadFolder: '',
     loading: false,
     canWrite: true, publicMode: 'off',
@@ -167,7 +166,7 @@ function connectWS() {
         else if (msg.type === 'files_changed') { reloadCurrent(); loadStatus(); }
         else if (msg.type === 'session_revoked') { setSession(''); showLock('Drive locked.'); }
         else if (msg.type === 'status_changed') { loadStatus(); }
-        else if (msg.type === 'bots_changed') { loadBots(); loadServers(); }
+        else if (msg.type === 'bots_changed') { loadBots(); }
     };
 }
 
@@ -210,9 +209,9 @@ function applyPermissions(d) {
     if (signIn) signIn.classList.toggle('hidden', S.canWrite);
     // The storage plumbing is not part of what gets published: /api/bots needs
     // write scope, so a visitor would only get a 403 and an empty panel.
-    document.querySelectorAll('[data-view="bots"],[data-view="servers"]')
+    document.querySelectorAll('[data-view="bots"]')
         .forEach(b => b.classList.toggle('hidden', !S.canWrite));
-    if (!S.canWrite && (S.view === 'bots' || S.view === 'servers')) switchView('drive');
+    if (!S.canWrite && S.view === 'bots') switchView('drive');
 }
 function requireWrite() {
     if (S.canWrite) return true;
@@ -257,11 +256,11 @@ async function unlock() {
 }
 
 // ---------- views / navigation ----------
-const VIEW_TITLES = { drive: 'Cloud Drive', recents: 'Recents', favorites: 'Favorites', links: 'Shared Links', trash: 'Trash', transfers: 'Transfers', bots: 'My Bots', servers: 'My Servers', settings: 'Settings' };
+const VIEW_TITLES = { drive: 'Cloud Drive', recents: 'Recents', favorites: 'Favorites', links: 'Shared Links', trash: 'Trash', transfers: 'Transfers', bots: 'Bots', settings: 'Settings' };
 const FILE_VIEWS = new Set(['drive','recents','favorites']);
 // recents/favorites share the drive panel — they are different catalog queries
 // rendered into the same explorer area.
-const PANEL_OF = { drive: 'view-drive', recents: 'view-drive', favorites: 'view-drive', links: 'view-links', trash: 'view-trash', transfers: 'view-transfers', bots: 'view-bots', servers: 'view-servers', settings: 'view-settings' };
+const PANEL_OF = { drive: 'view-drive', recents: 'view-drive', favorites: 'view-drive', links: 'view-links', trash: 'view-trash', transfers: 'view-transfers', bots: 'view-bots', settings: 'view-settings' };
 function switchView(v) {
     S.view = v; S.selected.clear();
     document.querySelectorAll('.nav-button').forEach(b => b.classList.toggle('active', b.dataset.view === v));
@@ -279,7 +278,6 @@ function switchView(v) {
     else if (v === 'links') loadLinks();
     else if (v === 'transfers') renderTransfersPage();
     else if (v === 'bots') loadBots();
-    else if (v === 'servers') loadServers();
     document.body.classList.remove('nav-open');
     $('new-menu').classList.add('hidden');
 }
@@ -496,16 +494,20 @@ function revealOnLoad(img) {
     img.addEventListener('load', () => img.classList.add('on'), { once: true });
     img.addEventListener('error', () => img.remove(), { once: true });
 }
-// Every thumbnail is the whole file decrypted through Discord — there is no
-// server-side thumbnailer. Cap it at one chunk so a listing cannot pull
-// hundreds of megabytes to paint 28px cells; larger images keep the type icon.
-const THUMB_MAX_BYTES = 8 * 1024 * 1024;
-const thumbable = f => isImage(f) && (f.size || 0) <= THUMB_MAX_BYTES;
+// Thumbnails come from /api/thumb: the server fetches the stored image once,
+// scales it to a ~30KB JPEG and caches it, so a listing of photos costs a few
+// hundred kilobytes instead of the full library decrypted through the storage
+// nodes. The extension set and size cap mirror the server's guards; anything
+// outside them keeps the type icon.
+const THUMB_EXT = new Set(['jpg','jpeg','png','gif']);
+const THUMB_MAX_BYTES = 12 * 1024 * 1024;
+const thumbable = f => THUMB_EXT.has(extOf(f.name)) && (f.size || 0) <= THUMB_MAX_BYTES;
+const thumbURL = f => withSession('/api/thumb?file_id=' + encodeURIComponent(f.id));
 function thumbHTML(f) {
-    // The type icon always renders underneath; the decrypted thumbnail fades in
-    // over it once Discord returns the bytes, so a cell is never a blank box.
+    // The type icon always renders underneath; the thumbnail fades in over it
+    // once the server returns the scaled bytes, so a cell is never a blank box.
     const icon = `<span class="fc-type-icon">${f.is_dir ? ICON.folder : iconFor(f)}</span>`;
-    if (thumbable(f)) return `<div class="fc-thumb">${icon}<img loading="lazy" data-src="${withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1')}" alt=""></div>`;
+    if (thumbable(f)) return `<div class="fc-thumb">${icon}<img loading="lazy" data-src="${thumbURL(f)}" alt=""></div>`;
     return `<div class="fc-thumb">${icon}</div>`;
 }
 function statusOf(f) {
@@ -550,7 +552,7 @@ function renderTable(files) {
         tr.className = 'file-row' + (S.selected.has(f.id) ? ' selected' : '');
         const st = statusOf(f);
         const icon = f.is_dir ? ICON.folder : iconFor(f);
-        const thumb = thumbable(f) ? icon + '<img loading="lazy" data-src="' + withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1') + '" alt="">' : icon;
+        const thumb = thumbable(f) ? icon + '<img loading="lazy" data-src="' + thumbURL(f) + '" alt="">' : icon;
         tr.innerHTML = `
             <td class="tc"><input type="checkbox" class="checkbox row-check" ${S.selected.has(f.id) ? 'checked' : ''}></td>
             <td><div class="fr-name"><span class="fr-icon k-${kindOf(f)}">${thumb}</span>
@@ -704,9 +706,9 @@ async function trashMove(ids) {
 async function trashRestore(ids) { await doBatch(ids, 'restore'); }
 async function deleteForever(ids) {
     const n = ids.length;
-    if (!await confirmBox('Delete ' + n + ' item' + (n === 1 ? '' : 's') + ' forever?', 'Encrypted parts will be removed from Discord. This cannot be undone.', true)) return;
+    if (!await confirmBox('Delete ' + n + ' item' + (n === 1 ? '' : 's') + ' forever?', 'Encrypted parts will be removed from storage. This cannot be undone.', true)) return;
     const r = await api('/api/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_ids: ids }) });
-    if (r.ok) { toast('Deleting… parts removed from Discord', 'success'); S.selected.clear(); reloadCurrent(); loadStatus(); }
+    if (r.ok) { toast('Deleting… parts removed from storage', 'success'); S.selected.clear(); reloadCurrent(); loadStatus(); }
     else toast(r.error, 'error');
 }
 async function loadTrash() {
@@ -741,7 +743,7 @@ async function loadTrash() {
 document.addEventListener('click', async e => {
     if (e.target.id === 'btn-empty-trash') {
         if (!S.trash.length) return toast('Trash already empty', 'info');
-        if (await confirmBox('Empty trash?', 'Deletes ' + S.trash.length + ' item(s) and their Discord parts forever.', true)) {
+        if (await confirmBox('Empty trash?', 'Deletes ' + S.trash.length + ' item(s) and their encrypted parts forever.', true)) {
             await api('/api/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_ids: S.trash.map(f => f.id) }) });
             toast('Trash emptied', 'success'); loadTrash(); loadStatus();
         }
@@ -841,7 +843,16 @@ function renderPreview(f) {
     const media = withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1');
     document.querySelectorAll('.pm-zoom-control,.pm-zoom-value,.pm-fit').forEach(el => el.classList.toggle('hidden', k !== 'image'));
     if (k === 'image') {
+        // Blur-up: the server thumbnail is small and cached, so it paints almost
+        // instantly; the full decrypted image replaces it the moment it arrives.
+        // The old viewer stared at a spinner for the entire shard fetch.
         stage.innerHTML = '<div class="pm-loading"><span class="spinner"></span>Decrypting…</div>';
+        if (thumbable(f)) {
+            const t = new Image();
+            t.className = 'pm-blurup'; t.alt = '';
+            t.onload = () => { if (previewFor === f.id) { stage.innerHTML = ''; stage.appendChild(t); } };
+            t.src = thumbURL(f);
+        }
         const img = new Image();
         img.id = 'pm-image'; img.alt = f.name; img.draggable = false;
         const fallback = msg => {
@@ -855,7 +866,7 @@ function renderPreview(f) {
             const b = stage.querySelector('#pm-dl3'); if (b) b.onclick = () => dl(f);
         }, 20000);
         img.onload = () => { clearTimeout(slow); stage.innerHTML = ''; stage.appendChild(img); fitPreview(); };
-        img.onerror = () => { clearTimeout(slow); fallback('This image could not be decoded in the browser.'); };
+        img.onerror = () => { clearTimeout(slow); if (thumbable(f)) { const t = new Image(); t.className = 'pm-blurup'; t.src = thumbURL(f); stage.innerHTML = ''; stage.appendChild(t); } else fallback('This image could not be decoded in the browser.'); };
         img.src = media;
     }
     else if (k === 'video') stage.innerHTML = `<video controls autoplay playsinline src="${media}"></video>`;
@@ -1080,6 +1091,9 @@ async function createTextFile() {
 const XFER_STAGE = { sending: 'Sending', queued: 'Processing', storing: 'Encrypting' };
 async function uploadOne(file, parentId) {
     const localID = 'send-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+    // Mirror the server's part size (uploader.DefaultChunkSize = 7.5 MB, chosen
+    // to stay under Discord's 8 MB attachment ceiling once PNG-wrapped) so the
+    // "part X of Y" counter on the storing leg matches what the engine reports.
     const parts = Math.max(1, Math.ceil(file.size / 7.5e6));
     const entry = {
         name: file.name, type: 'UPLOAD', file_id: '', total_bytes: file.size,
@@ -1171,12 +1185,29 @@ function watchJob(jobID) {
     };
     setTimeout(tick, 3000);
 }
+// A small concurrent send pool. The old loops awaited uploadOne one file at a
+// time, so a folder of twenty files spent twenty sequential round trips on the
+// browser→server leg even though the server happily accepts parallel uploads and
+// the shard-publish work behind it is already concurrent. Three in flight keeps
+// the pipe full without tripping the browser's per-host connection limit or the
+// server's multipart staging.
+const UPLOAD_CONCURRENCY = 3;
+async function runPool(items, worker) {
+    let i = 0;
+    const runners = Array.from({ length: Math.min(UPLOAD_CONCURRENCY, items.length) }, async () => {
+        while (i < items.length) {
+            const idx = i++;
+            await worker(items[idx], idx);
+        }
+    });
+    await Promise.all(runners);
+}
 async function uploadFiles(files) {
     if (!files.length || !requireWrite()) return;
     await ensureParentForUpload();
     toast(files.length === 1 ? 'Uploading ' + files[0].name + '…' : 'Uploading ' + files.length + ' files…', 'info');
     toggleDrawer(true);
-    for (const f of files) await uploadOne(f, S.parentID);
+    await runPool(files, f => uploadOne(f, S.parentID));
 }
 async function uploadDirectory(fileList) {
     await ensureParentForUpload();
@@ -1198,10 +1229,15 @@ async function uploadDirectory(fileList) {
     const top = [...roots][0] || 'upload';
     toast('Uploading folder "' + top + '" (' + files.length + ' files)…', 'info');
     toggleDrawer(true);
+    // Resolve every destination folder first (sequential, cached — two files in
+    // the same directory must not race to create it twice), then send in
+    // parallel.
+    const jobs = [];
     for (const f of files) {
         const rel = (f.webkitRelativePath || f.name).split('/').slice(0, -1).join('/');
-        await uploadOne(f, await folderFor(rel));
+        jobs.push({ file: f, parent: await folderFor(rel) });
     }
+    await runPool(jobs, j => uploadOne(j.file, j.parent));
     reloadCurrent();
 }
 async function ensureParentForUpload() { if (!S.parentID && (S.view !== 'drive' || $('search-input').value.trim())) S.parentID = ''; }
@@ -1238,12 +1274,19 @@ async function uploadDataTransfer(dt) {
         folderCache.set(rel, id);
         return id;
     };
-    for (const { file, rel } of files) await uploadOne(file, await folderFor(rel));
+    const jobs = [];
+    for (const { file, rel } of files) jobs.push({ file, parent: await folderFor(rel) });
+    await runPool(jobs, j => uploadOne(j.file, j.parent));
 }
 document.addEventListener('change', e => {
     if (e.target.id === 'file-input') { uploadFiles([...e.target.files]); e.target.value = ''; }
     if (e.target.id === 'dir-input') { uploadDirectory(e.target.files); e.target.value = ''; }
-    if (e.target.id === 'sort-select') { const [k, d] = e.target.value.split('-'); S.sortKey = k; S.sortDir = d; render(); }
+    if (e.target.id === 'sort-select' || e.target.id === 'sort-visible') {
+        const [k, d] = e.target.value.split('-');
+        S.sortKey = k; S.sortDir = d;
+        syncSortSelects();
+        render();
+    }
 });
 let dragDepth = 0;
 document.addEventListener('dragenter', e => { if (S.canWrite && e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) { dragDepth++; $('drop-overlay').classList.remove('hidden'); } });
@@ -1287,7 +1330,6 @@ function xferCard(t, id) {
 function renderTransfers() {
     const act = activeTransfers();
     const badge = $('nav-transfer-badge'); badge.classList.toggle('hidden', act.length === 0); badge.textContent = act.length;
-    $('hud-dot').classList.toggle('hidden', act.length === 0);
     renderTransfersDrawer();
     if (S.view === 'transfers') renderTransfersPage();
 }
@@ -1312,7 +1354,6 @@ document.addEventListener('click', async e => {
     if (e.target.dataset.x === 'dismiss' && card) { allTransfers.delete(card.dataset.id); saveTransfers(); renderTransfers(); }
     if (e.target.dataset.x === 'cancel-all' || e.target.id === 'btn-cancel-all') { await api('/api/jobs/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job_id: 'all' }) }); }
     if (e.target.closest('#btn-close-transfers')) toggleDrawer(false);
-    if (e.target.closest('#btn-open-transfers')) toggleDrawer(true);
 });
 function toggleDrawer(open) {
     $('transfers-drawer').classList.toggle('closed', !open);
@@ -1324,11 +1365,11 @@ async function loadBots() {
     const r = await api('/api/bots');
     S.bots = (r.data && r.data.nodes) || [];
     const box = $('bots-list');
-    if (!S.bots.length) { box.innerHTML = '<div class="infra-card">No bots yet. Paste a bot token above to provision encrypted storage in your server.</div>'; }
+    if (!S.bots.length) { box.innerHTML = '<div class="infra-card">No storage nodes yet. Add a bot token above to provision encrypted storage.</div>'; }
     else box.innerHTML = S.bots.map(b => `<div class="bot-card">
-        <span class="bc-avatar">🤖</span>
+        <span class="bc-avatar">${esc((b.bot_name || 'B')[0].toUpperCase())}</span>
         <div class="bc-main"><div class="bc-name">${esc(b.bot_name || 'Bot')} ${b.status === 'Active' ? '<span class="st ok" style="font-size:10px;vertical-align:1px">ACTIVE</span>' : ''}</div>
-        <div class="bc-sub">token: ${esc(b.bot_token ? '••••' + b.bot_token.slice(-4) : 'stored')} · ${b.guilds ? esc(b.guilds.join(', ')) : 'no server'}</div></div>
+        <div class="bc-sub">${b.guilds ? esc(b.guilds.join(', ')) : 'no server linked'}</div></div>
         <div class="bc-stats"><span>${b.channel_count || 0} ch</span><span>${fmtBytes(b.storage_bytes || 0)}</span></div>
         <button class="bc-del" data-id="${esc(b.id)}" data-token="${b.bot_token ? '1' : ''}" title="Remove">✕</button></div>`).join('');
     populateTargets();
@@ -1336,7 +1377,7 @@ async function loadBots() {
 document.addEventListener('click', async e => {
     const del = e.target.closest('.bc-del');
     if (del) {
-        if (!await confirmBox('Remove this bot?', 'Its channels are cleared from the catalog. Files already on Discord stay until you clean the channel.')) return;
+        if (!await confirmBox('Remove this bot?', 'Its channels are cleared from the catalog. Stored shards stay on the server until you clean the channel.')) return;
         const r = await api('/api/bots/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: del.dataset.id }) });
         if (r.ok) { toast('Bot removed', 'success'); loadBots(); } else toast(r.error, 'error');
     }
@@ -1350,39 +1391,19 @@ document.addEventListener('click', async e => {
     }
     if (e.target.id === 'btn-banner-bots') switchView('bots');
 });
-// Discord-style initial tile: letter and hue both derive from the name, so two
-// servers never render as the same badge.
-const AVATAR_HUES = ['#2f7ff5', '#5865f2', '#a855f7', '#31c48d', '#f5a524', '#e5484d', '#0ea5e9'];
-const avatarFor = name => {
-    const label = String(name || '?').trim();
-    let h = 0;
-    for (let i = 0; i < label.length; i++) h = (h * 31 + label.charCodeAt(i)) >>> 0;
-    return { letter: (label[0] || '?').toUpperCase(), hue: AVATAR_HUES[h % AVATAR_HUES.length] };
-};
-async function loadServers() {
-    const r = await api('/api/servers');
-    S.servers = (r.data && r.data.servers) || [];
-    const box = $('servers-list');
-    if (!S.servers.length) { box.innerHTML = '<div class="infra-card">No servers connected. Add a bot to replicate encrypted shards across servers.</div>'; return; }
-    box.innerHTML = S.servers.map(s => {
-        const name = s.guild_name || s.guild_id || 'Server';
-        const av = avatarFor(name);
-        // plain words, not an .st chip: `.st.ok` is display:none by design so a
-        // healthy file shows no badge, which would silently blank this line
-        const state = String(s.status || 'unknown').toLowerCase();
-        return `<div class="server-card">
-        <span class="bc-avatar" style="background:${av.hue}">${esc(av.letter)}</span>
-        <div class="bc-main"><div class="bc-name">${esc(name)}</div>
-        <div class="bc-sub">${s.channel_count || 0} storage channels · shards ${esc(state)}</div></div>
-        <div class="bc-stats"><span>${fmtBytes(s.storage_bytes || 0)}</span></div></div>`;
-    }).join('');
-    populateTargets();
-}
+// The upload-target dropdown reads the guilds straight off the bot nodes: the
+// separate servers view is gone, and /api/bots already carries guild_id/guild_name.
 function populateTargets() {
     const sel = $('upload-target-select');
+    if (!sel) return;
     const cur = sel.value;
     sel.innerHTML = '<option value="all">Every server</option>';
-    for (const s of S.servers) { const o = document.createElement('option'); o.value = s.guild_id; o.textContent = s.guild_name || s.guild_id; sel.appendChild(o); }
+    const seen = new Set();
+    for (const b of S.bots) {
+        if (!b.guild_id || seen.has(b.guild_id)) continue;
+        seen.add(b.guild_id);
+        const o = document.createElement('option'); o.value = b.guild_id; o.textContent = b.guild_name || b.guild_id; sel.appendChild(o);
+    }
     sel.value = [...sel.options].some(o => o.value === cur) ? cur : 'all';
 }
 
@@ -1410,7 +1431,7 @@ document.addEventListener('click', async e => {
     if (e.target.id === 'token-output') { try { await navigator.clipboard.writeText(e.target.dataset.full); toast('Copied', 'success'); } catch (err) {} }
     if (e.target.id === 'btn-lock-now') { await api('/api/auth/lock', { method: 'POST' }); setSession(''); showLock('Locked — unlock to continue.'); }
     if (e.target.id === 'btn-catalog-sync') { const r = await api('/api/catalog/sync', { method: 'POST' }); toast(r.ok ? 'Catalog checkpointed' : 'Failed: ' + r.error, r.ok ? 'success' : 'error'); }
-    if (e.target.id === 'btn-catalog-restore') { if (await confirmBox('Restore catalog?', 'Rebuilds the file listing from the last Discord checkpoint.')) { const r = await api('/api/catalog/restore', { method: 'POST' }); toast(r.ok ? 'Catalog restored: ' + (r.data.files_imported || 0) + ' files' : 'Failed: ' + r.error, r.ok ? 'success' : 'error'); reloadCurrent(); } }
+    if (e.target.id === 'btn-catalog-restore') { if (await confirmBox('Restore catalog?', 'Rebuilds the file listing from the last checkpoint.')) { const r = await api('/api/catalog/restore', { method: 'POST' }); toast(r.ok ? 'Catalog restored: ' + (r.data.files_imported || 0) + ' files' : 'Failed: ' + r.error, r.ok ? 'success' : 'error'); reloadCurrent(); } }
 });
 
 // ---------- header / menus ----------
@@ -1462,6 +1483,8 @@ function wireUI() {
         document.querySelectorAll('.pill').forEach(x => x.classList.toggle('active', x === p));
         render();
     }));
+    const sv = $('sort-visible');
+    if (sv) sv.value = S.sortKey + '-' + S.sortDir;
     let searchT;
     $('search-input').addEventListener('input', () => {
         $('btn-clear-search').classList.toggle('hidden', !$('search-input').value);
@@ -1477,7 +1500,6 @@ function wireUI() {
     $('bb-favorite').addEventListener('click', () => doBatch([...S.selected], 'favorite'));
     $('bb-trash').addEventListener('click', () => trashMove([...S.selected]));
     $('bb-delete').addEventListener('click', () => deleteForever([...S.selected]));
-    $('btn-open-diagnostics').addEventListener('click', () => { $('log-drawer').classList.add('open'); $('drawer-scrim').classList.remove('hidden'); });
     $('btn-close-log').addEventListener('click', () => { $('log-drawer').classList.remove('open'); $('drawer-scrim').classList.add('hidden'); });
     $('drawer-scrim').addEventListener('click', () => { $('log-drawer').classList.remove('open'); $('drawer-scrim').classList.add('hidden'); });
     // show only the control that switches to the other mode, from the first paint
@@ -1495,6 +1517,16 @@ function setLayout(l) {
 }
 function updateSortHeads() {
     document.querySelectorAll('.th-sort').forEach(th => { th.classList.remove('asc', 'desc'); if (th.dataset.sort === S.sortKey) th.classList.add(S.sortDir); });
+    syncSortSelects();
+}
+// The hidden #sort-select is the a11y/script hook, #sort-visible is what the
+// user sees; both must agree with whatever the column headers just set.
+function syncSortSelects() {
+    const v = S.sortKey + '-' + S.sortDir;
+    for (const id of ['sort-select', 'sort-visible']) {
+        const el = $(id);
+        if (el) el.value = v;
+    }
 }
 
 // ---------- boot ----------
@@ -1502,11 +1534,15 @@ let booted = false;
 async function boot() {
     if (booted) return; booted = true;
     connectWS();
-    await loadStatus();
+    // Paint the drive first. The old boot awaited loadStatus() (a full catalog
+    // round trip) before switchView('drive'), so on a slow host the listing sat
+    // empty behind the lock's fade until the status call returned — the user
+    // read that as "folders don't load until I click Cloud Drive". Status and
+    // the infra lists are background work; the drive is the point.
     switchView('drive');
-    // /api/bots needs write scope; a published visitor would only collect a 403
-    if (S.canWrite) { loadBots(); loadServers(); }
     loadStatus();
+    // /api/bots needs write scope; a published visitor would only collect a 403
+    if (S.canWrite) { loadBots(); }
     reconcileJobs();
     setInterval(loadStatus, 60000);
     logLine('drive unlocked — engine ready', 'ok');

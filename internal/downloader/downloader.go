@@ -447,6 +447,54 @@ func (e *Engine) StreamDownloadRange(ctx context.Context, fileID string, start, 
 	return nil
 }
 
+// GetFileBytes returns the whole decrypted file in memory. It exists for the
+// thumbnailer, which must decode the image to scale it; the browser-facing
+// download paths stream instead so they never hold a large file at once. Callers
+// are expected to have bounded the size first.
+func (e *Engine) GetFileBytes(ctx context.Context, fileID string) ([]byte, error) {
+	e.mu.RLock()
+	key := e.masterKey
+	e.mu.RUnlock()
+	if len(key) != crypto.KeyLength {
+		return nil, errors.New("drive is locked")
+	}
+
+	fileRec, err := e.db.GetFile(fileID)
+	if err != nil || fileRec == nil {
+		return nil, fmt.Errorf("file not found %w", err)
+	}
+	allChunks, err := e.db.GetChunksForFile(fileID)
+	if err != nil || len(allChunks) == 0 {
+		return nil, fmt.Errorf("no uploaded parts found for %s %w", fileRec.Name, err)
+	}
+
+	// One row per chunk index; a part replicated to several servers is fetched
+	// once. Order by index so the concatenation is the original byte stream.
+	byIndex := make(map[int]db.ChunkRecord, len(allChunks))
+	maxIdx := -1
+	for _, ch := range allChunks {
+		if _, seen := byIndex[ch.ChunkIndex]; !seen {
+			byIndex[ch.ChunkIndex] = ch
+			if ch.ChunkIndex > maxIdx {
+				maxIdx = ch.ChunkIndex
+			}
+		}
+	}
+	out := make([]byte, 0, fileRec.Size)
+	for i := 0; i <= maxIdx; i++ {
+		ch, ok := byIndex[i]
+		if !ok {
+			return nil, fmt.Errorf("missing part %d of %s", i, fileRec.Name)
+		}
+		dec, err := e.fetchChunk(ctx, fileID, ch, key)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, dec...)
+	}
+	return out, nil
+}
+
 func (e *Engine) StreamDownload(ctx context.Context, fileID string, w io.Writer) error {
 	e.mu.RLock()
 	key := e.masterKey

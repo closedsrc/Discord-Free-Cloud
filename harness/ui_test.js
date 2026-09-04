@@ -135,16 +135,23 @@ globalThis.fetch = fakeFetch;
 // so a test can emit progress mid-flight and assert what the UI showed.
 globalThis.FormData = class { constructor(){ this.parts = []; } append(k, v){ this.parts.push([k, v]); } };
 globalThis.File = class { constructor(bits, name, opts){ this.name = name; this.size = (opts && opts.size) || 1024; this.type = (opts && opts.type) || ''; } };
-const xhrControl = { pending: null, log: [] };
+const xhrControl = { pending: null, live: [], log: [] };
 globalThis.XMLHttpRequest = class {
-  constructor() { this.upload = {}; this.status = 0; this.responseText = ''; this._headers = {}; }
+  constructor() { this.upload = {}; this.status = 0; this.responseText = ''; this._headers = {}; this._done = false; }
   open(method, url) { this.method = method; this.url = url; }
   setRequestHeader(k, v) { this._headers[k] = v; }
-  send(body) { this.body = body; xhrControl.pending = this; xhrControl.log.push(this.method + ' ' + this.url); }
+  send(body) {
+    this.body = body; xhrControl.pending = this; xhrControl.live.push(this);
+    xhrControl.log.push(this.method + ' ' + this.url);
+  }
   // helpers the test calls
   emitProgress(loaded, total) { this.upload.onprogress && this.upload.onprogress({ lengthComputable: true, loaded, total }); }
-  finish(status, obj) { this.status = status; this.responseText = JSON.stringify(obj); this.onload && this.onload(); }
-  fail() { this.onerror && this.onerror(); }
+  finish(status, obj) {
+    this.status = status; this.responseText = JSON.stringify(obj);
+    if (!this._done) { this._done = true; const i = xhrControl.live.indexOf(this); if (i >= 0) xhrControl.live.splice(i, 1); }
+    this.onload && this.onload();
+  }
+  fail() { this._done = true; const i = xhrControl.live.indexOf(this); if (i >= 0) xhrControl.live.splice(i, 1); this.onerror && this.onerror(); }
 };
 
 // ---------- load app.js ----------
@@ -347,6 +354,28 @@ async function run() {
   check('the failed upload is marked FAILED', failedXfer && failedXfer.status === 'FAILED', JSON.stringify(failedXfer && failedXfer.status));
   check('the failure carries the server reason', failedXfer && /no storage server/.test(failedXfer.error), JSON.stringify(failedXfer && failedXfer.error));
   check('the user is toasted about the failure', $('toast-stack').children.length > 0, 'toasts=' + $('toast-stack').children.length);
+
+  console.log('\n== a multi-file upload sends several files at once (was strictly sequential) ==');
+  // The reported slowness: dropping a folder sent one file, waited for the whole
+  // multipart body, then sent the next. The send pool must keep UPLOAD_CONCURRENCY
+  // requests in flight so the browser→server leg overlaps.
+  app.allTransfers.clear();
+  xhrControl.live = []; xhrControl.log = []; xhrControl.pending = null;
+  const many = Array.from({ length: 5 }, (_, i) => new File(['x'], 'bulk-' + i + '.bin', { size: 20 * 1024 * 1024 }));
+  const bulk = app.uploadFiles(many);
+  await new Promise(r => setTimeout(r, 5));
+  check('three sends are in flight at once', xhrControl.live.length === 3, 'live=' + xhrControl.live.length);
+  check('each in-flight send has a card', app.allTransfers.size === 3, 'cards=' + app.allTransfers.size);
+  // drain: finish each live request as it appears so the pool advances to 5 total
+  let guard = 0;
+  while (xhrControl.live.length && guard++ < 20) {
+    const req = xhrControl.live[0];
+    fetchQueue.push({ url: '/api/jobs', ok: true, body: [] });
+    req.finish(200, { ok: true, job_id: 'JOB-' + guard, file_name: req.body && 'x', status: 'started' });
+    await new Promise(r => setTimeout(r, 2));
+  }
+  await bulk;
+  check('every file eventually sent', xhrControl.log.filter(l => l.includes('/api/upload/file')).length === 5, 'sends=' + xhrControl.log.filter(l => l.includes('/api/upload/file')).length);
 
   console.log('\n== text preview passes the session with the URL, like <img> does ==');
   // A media fetch cannot set a header, so the session travels in the URL

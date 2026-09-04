@@ -26,7 +26,7 @@ import (
 
 const (
 	DefaultChunkSize = 7500 * 1024
-	DefaultWorkers   = 6
+	DefaultWorkers   = 8
 )
 
 type TelemetryEvent struct {
@@ -392,6 +392,10 @@ func (e *Engine) UploadFile(ctx context.Context, localFilePath, virtualPath, par
 		return "", fmt.Errorf("could not create job %w", err)
 	}
 
+	// Build every part row first, then insert them in one statement. The old
+	// per-row CreateChunk meant a catalog round trip per part before the browser
+	// even got its upload response, which dominated the ack time for large files.
+	var pendingChunks []*db.ChunkRecord
 	for _, scSet := range serverChannelSets {
 		srv := scSet.target
 		chList := scSet.channels
@@ -428,9 +432,7 @@ func (e *Engine) UploadFile(ctx context.Context, localFilePath, virtualPath, par
 				Status:     db.StatusPending,
 				CreatedAt:  time.Now().Unix(),
 			}
-			if err := e.db.CreateChunk(chunkRec); err != nil {
-				return "", fmt.Errorf("could not prepare part %d on server %s %w", i, srv.GuildName, err)
-			}
+			pendingChunks = append(pendingChunks, chunkRec)
 
 			dispName := sh.ChannelName
 			if srv.GuildName != "" {
@@ -445,6 +447,9 @@ func (e *Engine) UploadFile(ctx context.Context, localFilePath, virtualPath, par
 				botToken: srv.BotToken,
 			})
 		}
+	}
+	if err := e.db.CreateChunks(pendingChunks); err != nil {
+		return "", fmt.Errorf("could not prepare parts %w", err)
 	}
 
 	jobCtx, cancel := context.WithCancel(ctx)
@@ -491,13 +496,9 @@ func (e *Engine) runUpload(ctx context.Context, tracker *activeUpload, job *db.J
 	}
 	defer f.Close()
 
-	if file.SHA256 == "" {
-		if hash, hashErr := crypto.ComputeStreamSHA256(f); hashErr == nil && hash != "" {
-			file.SHA256 = hash
-			_ = e.db.UpsertFile(file)
-		}
-		_, _ = f.Seek(0, 0)
-	}
+	// The whole-file hash used to be computed here with a full sequential read
+	// before any worker started, delaying the first shard on every upload. It is
+	// computed after the last shard instead, while the staged file is still open.
 
 	chunkChan := make(chan partWorkItem, len(items))
 	for _, it := range items {
@@ -733,6 +734,13 @@ func (e *Engine) runUpload(ctx context.Context, tracker *activeUpload, job *db.J
 		return
 	}
 
+	if file.SHA256 == "" {
+		if _, serr := f.Seek(0, 0); serr == nil {
+			if hash, herr := crypto.ComputeStreamSHA256(f); herr == nil && hash != "" {
+				file.SHA256 = hash
+			}
+		}
+	}
 	_ = e.db.UpsertFile(file)
 	_ = e.db.UpdateJobStatus(job.ID, db.JobStatusCompleted)
 

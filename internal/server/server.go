@@ -172,6 +172,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) http.Handler {
 	mux.HandleFunc("/api/files/restore", s.handleFileRestore)
 	mux.HandleFunc("/api/files/details", s.handleFileDetails)
 	mux.HandleFunc("/api/files/raw_chunk", s.handleFileRawChunk)
+	mux.HandleFunc("/api/thumb", s.handleThumb)
 	mux.HandleFunc("/api/files/batch", s.handleFilesBatch)
 	mux.HandleFunc("/api/files/view", s.handleFilesView)
 
@@ -936,10 +937,19 @@ func (s *Server) handleStreamDownload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	if r.URL.Query().Get("inline") == "1" || r.URL.Query().Get("preview") == "1" {
+	inline := r.URL.Query().Get("inline") == "1" || r.URL.Query().Get("preview") == "1" || r.URL.Query().Get("thumb") == "1"
+	if inline {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, fileRec.Name))
+		// A preview/thumbnail is the whole file decrypted out of Discord, which is
+		// the single most expensive read in the product. The URL carries the
+		// session, so the browser cache key is already per-user; letting it hold
+		// the bytes for an hour turns a re-open from a full re-decrypt into a
+		// cache hit. The catalog never mutates a stored file's bytes in place, so
+		// a stale hit is impossible for a given file id.
+		w.Header().Set("Cache-Control", "private, max-age=3600")
 	} else {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileRec.Name))
+		w.Header().Set("Cache-Control", "private, no-cache")
 	}
 
 	w.Header().Set("Content-Type", mimeType)

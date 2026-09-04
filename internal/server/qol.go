@@ -108,11 +108,28 @@ func (s *Server) filePartsBreakdown(fileID string) []ChunkPart {
 }
 
 func (s *Server) decorate(files []db.FileRecord) []FileView {
+	// One bulk health query for the whole listing instead of one per file: a
+	// folder with many rows used to fan out a catalog round trip for every
+	// non-directory, which dominated the time to first paint.
+	ids := make([]string, 0, len(files))
+	for _, f := range files {
+		if !f.IsDir {
+			ids = append(ids, f.ID)
+		}
+	}
+	health, err := s.db.BulkChunkHealth(ids)
+	if err != nil {
+		health = nil
+	}
 	out := make([]FileView, 0, len(files))
 	for _, f := range files {
 		v := FileView{FileRecord: f}
 		if !f.IsDir {
-			v.AttachmentCount, v.ChunkCount, v.ReplicaServers, v.Health = s.fileHealth(f.ID)
+			if h, ok := health[f.ID]; ok {
+				v.AttachmentCount, v.ChunkCount, v.ReplicaServers, v.Health = h.Attachments, h.Parts, h.Servers, h.Status
+			} else {
+				v.AttachmentCount, v.ChunkCount, v.ReplicaServers, v.Health = s.fileHealth(f.ID)
+			}
 		}
 		out = append(out, v)
 	}

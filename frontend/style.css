@@ -15,7 +15,7 @@
     --text:#fafafa;          /* zinc-50 — filenames, sizes and dates alike */
     --text-2:#a1a1aa;        /* zinc-400 — column headers, meta, captions */
     --text-3:#71717a;        /* zinc-500 — the faintest legible label */
-    --blue:#2f7ff5; --accent:#5865f2; --red:#e5484d; --amber:#f5a524; --green:#31c48d; --purple:#a855f7;
+    --blue:#2f7ff5; --accent:#2f7ff5; --red:#e5484d; --amber:#f5a524; --green:#31c48d; --purple:#a855f7;
     --focus:#60a5fa;
     --radius:8px; --row:44px; --tile:176px;
     --ease:cubic-bezier(.2,0,.2,1);   /* Material-ish standard, for hover/state */
@@ -44,33 +44,19 @@ svg{display:block;flex:none}
 
 .app{display:flex;height:100vh;width:100%}
 
-/* ---------- far-left icon rail ---------- */
-.rail{
-    width:64px;flex:none;background:var(--rail);border-right:1px solid var(--line);
-    display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 0;
-}
-.rail-logo{
-    width:36px;height:36px;border-radius:11px;background:var(--line);color:var(--text);
-    display:grid;place-items:center;margin-bottom:12px;
-}
-.rail-btn{
-    position:relative;width:38px;height:38px;border-radius:10px;color:var(--text-3);
-    display:grid;place-items:center;transition:background .12s,color .12s;
-}
-.rail-btn svg{width:20px;height:20px}
-.rail-btn:hover{background:var(--line);color:var(--text)}
-.rail-btn.active{background:var(--line);color:var(--text)}
-/* the two infra buttons are also .nav-button (sidebar rows), whose left-aligned
-   flex layout would drag their glyphs off the rail's centre line */
-.rail .nav-button{width:38px;height:38px;padding:0;gap:0;justify-content:center}
-.rail-dot{position:absolute;top:7px;right:7px;width:7px;height:7px;border-radius:50%;background:var(--blue);box-shadow:0 0 0 2px var(--rail)}
-
 /* ---------- sidebar ---------- */
 .sidebar{
     width:250px;flex:none;background:var(--bg);border-right:1px solid var(--line);
     display:flex;flex-direction:column;min-height:0;
 }
-.sb-head{height:56px;flex:none;display:flex;align-items:center;padding:0 18px}
+.sb-head{height:56px;flex:none;display:flex;align-items:center;gap:10px;padding:0 18px}
+/* the brand mark: a sealed vault dial, drawn in the accent blue. It is the only
+   saturated element in the header row, so the eye lands on it first and the
+   wordmark reads as its label rather than the other way round. */
+.sb-logo{
+    width:28px;height:28px;flex:none;border-radius:8px;background:var(--blue);color:#fff;
+    display:grid;place-items:center;
+}
 .sb-wordmark{font-size:15px;font-weight:500;color:var(--text);letter-spacing:-.012em}
 .sb-tree{padding:2px 12px 10px}
 .tree-row{
@@ -85,8 +71,6 @@ svg{display:block;flex:none}
 .tree-icon svg{width:19px;height:19px}
 .tree-label{font-size:15px;font-weight:450;letter-spacing:-.01em}
 .sb-nav{padding:0 12px;display:flex;flex-direction:column;gap:2px;overflow-y:auto;flex:1;min-height:0}
-/* duplicates of the icon-rail destinations; only shown once the rail is gone */
-.sb-nav .rail-only{display:none}
 .nav-button{
     width:100%;height:40px;border-radius:var(--radius);display:flex;align-items:center;gap:12px;
     padding:0 12px;color:var(--text);font-size:15px;font-weight:450;letter-spacing:-.01em;
@@ -212,6 +196,21 @@ body.read-only #view-settings .card:first-child{display:none}
 
 /* ---------- panels ---------- */.view-panel{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
 .content-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden}
+/* type filter + sort, one quiet row under the header. The pills are the only
+   place the filter state shows; the sort select mirrors the column headers so
+   grid view (which has no headers) stays sortable. */
+.filter-row{flex:none;display:flex;align-items:center;gap:6px;padding:2px 24px 10px;flex-wrap:wrap}
+.filter-row .pill{
+    height:28px;padding:0 12px;border-radius:999px;font-size:12.5px;font-weight:450;color:var(--text-2);
+    background:var(--raise);border:1px solid transparent;transition:background .12s,color .12s;
+}
+.filter-row .pill:hover{background:var(--line);color:var(--text)}
+.filter-row .pill.active{background:var(--raise-2);color:var(--text);border-color:var(--line)}
+.sort-pick{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-3)}
+.sort-pick select{
+    height:28px;padding:0 8px;border-radius:7px;background:var(--raise);border:1px solid var(--line);
+    font-size:12.5px;color:var(--text);cursor:pointer;
+}
 .sub-toolbar{height:44px;flex:none;display:flex;align-items:center;gap:12px;padding:0 24px}
 .sub-count{font-size:13px;color:var(--text-3)}
 .banner{
@@ -610,6 +609,9 @@ body.read-only #view-settings .card:first-child{display:none}
 .pm-edge:hover{background:var(--raise-2);color:var(--text)}
 .pm-stage{flex:1;min-width:0;display:grid;place-items:center;overflow:hidden;background:var(--rail);padding:16px}
 .pm-stage img{max-width:100%;max-height:100%;object-fit:contain;border-radius:5px}
+/* the server thumbnail shown while the full image decrypts: scaled up slightly
+   and blurred so its low resolution reads as depth-of-field, not as a defect */
+.pm-stage img.pm-blurup{transform:scale(1.04);filter:blur(14px) saturate(1.05);opacity:.9}
 .pm-stage img#pm-image{
     transform-origin:center center;transition:transform .13s ease-out;
     will-change:transform;cursor:zoom-in;-webkit-user-drag:none;user-select:none;
@@ -711,10 +713,6 @@ body.drawer-open .toast-stack{right:362px}
     .searchbox{width:250px}
 }
 @media (max-width:960px){
-    .rail{display:none}
-    /* the rail's destinations move into the drawer, which is the only nav there */
-    .sb-nav .rail-only{display:flex}
-    .sb-nav .nav-sep.rail-only{display:block;height:1px;background:var(--line);margin:7px 10px}
     .sidebar{
         position:fixed;top:0;left:0;bottom:0;z-index:120;transform:translateX(-100%);
         transition:transform .22s ease;

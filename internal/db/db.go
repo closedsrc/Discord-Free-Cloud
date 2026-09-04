@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -729,6 +730,58 @@ func (d *Database) CreateChunk(c *ChunkRecord) error {
 	return err
 }
 
+// CreateChunks inserts every part row of an upload job in one statement. The
+// per-row CreateChunk meant one network round trip to the catalog database per
+// part before the browser got its upload response; on a remote Postgres that
+// added seconds to the ack of every multi-part file.
+//
+// Postgres caps a statement at 65535 bind parameters, and each row binds 15, so
+// the insert is split into batches that stay well under the ceiling.
+func (d *Database) CreateChunks(cs []*ChunkRecord) error {
+	if len(cs) == 0 {
+		return nil
+	}
+	const cols = 15
+	const maxRows = 4000 // 4000*15 = 60000 params, under the 65535 limit
+	for start := 0; start < len(cs); start += maxRows {
+		end := start + maxRows
+		if end > len(cs) {
+			end = len(cs)
+		}
+		if err := d.createChunksBatch(cs[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Database) createChunksBatch(cs []*ChunkRecord) error {
+	const cols = 15
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO chunks (id, job_id, file_id, chunk_index, byte_offset, chunk_size, sha256, guild_id, channel_id, message_id, attachment_id, attachment_url, status, retry_count, created_at) VALUES `)
+	args := make([]any, 0, len(cs)*cols)
+	for i, c := range cs {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		base := i * cols
+		sb.WriteString("(")
+		for j := 1; j <= cols; j++ {
+			if j > 1 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, "$%d", base+j)
+		}
+		sb.WriteString(")")
+		args = append(args, c.ID, c.JobID, c.FileID, c.ChunkIndex, c.ByteOffset, c.ChunkSize, c.SHA256, c.GuildID, c.ChannelID, c.MessageID, c.AttachmentID, c.AttachmentURL, c.Status, c.RetryCount, c.CreatedAt)
+	}
+	_, err := d.db.Exec(sb.String(), args...)
+	return err
+}
+
 func (d *Database) UpdateChunkStatus(chunkID string, status string, channelID, messageID, attachmentID, attachmentURL string) error {
 	return d.UpdateChunkWithGuild(chunkID, status, "", channelID, messageID, attachmentID, attachmentURL)
 }
@@ -957,6 +1010,104 @@ func (d *Database) GetPendingChunks(jobID string) ([]ChunkRecord, error) {
 		list = append(list, c)
 	}
 	return list, nil
+}
+
+// ChunkHealth is the per-file storage summary the drive listing shows.
+type ChunkHealth struct {
+	Attachments int
+	Parts       int
+	Servers     int
+	Status      string // ok | partial | empty
+}
+
+// BulkChunkHealth computes the storage health for many files in a handful of
+// queries. The listing used to call GetAllChunksForFile once per row, so a
+// folder with a hundred files cost a hundred catalog round trips before the
+// browser saw anything; on a remote Postgres that was the slowest part of
+// opening a folder.
+//
+// The id list is chunked because Postgres caps a statement at 65535 bind
+// parameters, and a global search can match far more files than that.
+func (d *Database) BulkChunkHealth(fileIDs []string) (map[string]ChunkHealth, error) {
+	out := make(map[string]ChunkHealth, len(fileIDs))
+	if len(fileIDs) == 0 {
+		return out, nil
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	type agg struct {
+		parts       map[int]bool
+		stored      map[int]bool
+		attachments int
+		guilds      map[string]bool
+	}
+	byFile := map[string]*agg{}
+
+	const maxIDs = 20000
+	for start := 0; start < len(fileIDs); start += maxIDs {
+		end := start + maxIDs
+		if end > len(fileIDs) {
+			end = len(fileIDs)
+		}
+		batch := fileIDs[start:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args[i] = id
+		}
+		query := `
+			SELECT file_id, chunk_index, status, COALESCE(guild_id, '')
+			FROM chunks WHERE file_id IN (` + strings.Join(placeholders, ",") + `)`
+		rows, err := d.db.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var fileID string
+			var idx int
+			var status, guild string
+			if err := rows.Scan(&fileID, &idx, &status, &guild); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			a := byFile[fileID]
+			if a == nil {
+				a = &agg{parts: map[int]bool{}, stored: map[int]bool{}, guilds: map[string]bool{}}
+				byFile[fileID] = a
+			}
+			a.parts[idx] = true
+			if status == StatusCompleted {
+				a.attachments++
+				a.stored[idx] = true
+				if guild != "" {
+					a.guilds[guild] = true
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+
+	// Parts counts distinct chunk indexes, not rows: a part replicated to two
+	// servers is one part with two attachments. This mirrors fileHealth exactly.
+	for fileID, a := range byFile {
+		h := ChunkHealth{Attachments: a.attachments, Parts: len(a.parts), Servers: len(a.guilds)}
+		switch {
+		case len(a.stored) == 0:
+			h.Status = "empty"
+		case len(a.stored) < len(a.parts):
+			h.Status = "partial"
+		default:
+			h.Status = "ok"
+		}
+		out[fileID] = h
+	}
+	return out, nil
 }
 
 func (d *Database) FindChunkByHash(sha256Hash string) (*ChunkRecord, error) {
