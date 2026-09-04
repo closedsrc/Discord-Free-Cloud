@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=4042">
+    <link rel="stylesheet" href="style.css?v=4043">
 </head>
 <body class="theme-dark">
 <div class="app">
@@ -86,7 +86,7 @@
                 <h1 id="page-title">Cloud Drive</h1>
                 <div class="crumbs" id="breadcrumb-bar"></div>
             </div>
-            <span class="ro-badge hidden" id="read-only-badge" title="Published read-only — sign in to make changes">Read-only</span>
+            <span class="ro-badge hidden" id="read-only-badge" title="Published read-only. Sign in to make changes">Read-only</span>
             <button class="btn-signin hidden" id="btn-sign-in" title="Sign in to make changes">Sign in</button>
             <div class="tb-right">
                 <div class="searchbox">
@@ -212,7 +212,7 @@
                 </div>
                 <div class="card">
                     <h2>API tokens</h2>
-                    <p>Used by backup scripts and integrations. A new token replaces the old one — update your scripts after rotating.</p>
+                    <p>Used by backup scripts and integrations. A new token replaces the old one. Update your scripts after rotating.</p>
                     <div class="field-row">
                         <button class="btn-ghost" id="btn-rotate-write">Rotate write token</button>
                         <button class="btn-ghost" id="btn-rotate-read">Rotate read token</button>
@@ -248,7 +248,7 @@
 <div class="modal hidden" id="modal-preview">
     <div class="preview-modal">
         <div class="pm-head">
-            <div class="pm-title"><span id="pm-name">—</span><span class="pm-size" id="pm-size"></span></div>
+            <div class="pm-title"><span id="pm-name"></span><span class="pm-size" id="pm-size"></span></div>
             <button class="pm-action" id="pm-download" title="Download"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v3.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V15"/><path d="M7.5 10.5 12 15l4.5-4.5M12 15V3.5"/></svg></button>
             <button class="pm-action" id="pm-share" title="Copy share link"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></button>
             <button class="pm-action" id="pm-favorite" title="Favorite"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.2l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg></button>
@@ -274,7 +274,7 @@
                 <dl id="pm-details-list"></dl>
                 <h4>Storage health</h4>
                 <div id="pm-health-list" class="health-rows"></div>
-                <p class="health-explain">Each part is an AES-256-GCM encrypted PNG wrapper posted to your storage servers by a webhook. The webhook is transport only — the bytes live in the message <strong>attachment</strong>, never in the text. Click a part to download the raw encrypted wrapper.</p>
+                <p class="health-explain">Each part is an AES-256-GCM encrypted PNG wrapper posted to your storage servers by a webhook. The webhook is transport only: the bytes live in the message <strong>attachment</strong>, never in the text. Click a part to download the raw encrypted wrapper.</p>
                 <h4>Shares</h4>
                 <div id="pm-shares"></div>
             </aside>
@@ -325,6 +325,6 @@
 <input type="file" id="file-input" multiple hidden>
 <input type="file" id="dir-input" webkitdirectory directory multiple hidden>
 
-<script src="app.js?v=4042"></script>
+<script src="app.js?v=4043"></script>
 </body>
 </html>

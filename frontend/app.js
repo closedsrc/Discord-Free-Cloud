@@ -21,7 +21,7 @@ async function api(url, opts = {}) {
     const ct = res.headers.get('content-type') || '';
     if (ct.includes('json')) { try { data = await res.json(); } catch (e) { data = {}; } }
     else { data = { _text: await res.text().catch(() => '') }; }
-    if (res.status === 401 && !url.startsWith('/api/auth/')) { setSession(''); showLock('Session expired — unlock again.'); }
+    if (res.status === 401 && !url.startsWith('/api/auth/')) { setSession(''); showLock('Session expired. Unlock again.'); }
     return { ok: res.ok && data.ok !== false, status: res.status, error: data.error || '', data };
 }
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
@@ -638,8 +638,8 @@ async function copyLink(f) {
     if (S.view === 'links') loadLinks();
     // clipboard access needs a permission the browser may refuse (and always
     // refuses over plain http); fall back to showing the URL to copy by hand
-    try { await navigator.clipboard.writeText(url); toast('Share link copied — valid 7 days', 'success'); }
-    catch (e) { toast('Share link created — valid 7 days', 'success'); showInput('Share link (copy it)', url, false).then(() => {}); }
+    try { await navigator.clipboard.writeText(url); toast('Share link copied, valid 7 days', 'success'); }
+    catch (e) { toast('Share link created, valid 7 days', 'success'); showInput('Share link (copy it)', url, false).then(() => {}); }
 }
 function openFileMenu(f, rect) {
     closeMenu();
@@ -886,10 +886,10 @@ function renderPreview(f) {
         // same way; without it the response is a 401 and the <pre> shows nothing.
         fetch(withSession('/api/download/file?file_id=' + encodeURIComponent(f.id) + '&inline=1'))
             .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
-            .then(t => { stage.querySelector('pre').textContent = t.length > 500000 ? t.slice(0, 500000) + '\n\n… truncated — download for full file' : t; })
+            .then(t => { stage.querySelector('pre').textContent = t.length > 500000 ? t.slice(0, 500000) + '\n\n… truncated, download for the full file' : t; })
             .catch(() => stage.innerHTML = '<div class="no-preview"><div class="np-icon">⚠</div>Could not load text preview</div>');
     } else {
-        stage.innerHTML = `<div class="no-preview"><div class="np-icon">${ICON[k] || ICON.other}</div>${k === 'dir' ? 'Folder — open from the drive.' : 'No inline preview for this type'}<button class="btn-primary btn-sm" id="pm-dl2">Download file</button></div>`;
+        stage.innerHTML = `<div class="no-preview"><div class="np-icon">${ICON[k] || ICON.other}</div>${k === 'dir' ? 'Folder. Open it from the drive.' : 'No inline preview for this type'}<button class="btn-primary btn-sm" id="pm-dl2">Download file</button></div>`;
         const b = stage.querySelector('#pm-dl2'); if (b) b.onclick = () => dl(f);
     }
     renderDetails(f);
@@ -933,7 +933,7 @@ function renderDetails(f) {
         let box = $('pm-verify'); if (!box) { box = document.createElement('div'); box.id = 'pm-verify'; h.after(box); }
         if (r.ok && r.data.result) {
             const res = r.data.result;
-            box.innerHTML = `<div class="verify-result ${res.ok ? 'ok' : 'fail'}">${res.ok ? '✓ Integrity confirmed — ' + (res.chunks || []).filter(c => c.ok).length + '/' + (res.chunks || []).length + ' parts + whole-file hash match' : '✗ Verification failed: ' + esc(res.error || 'hash mismatch')}</div>`;
+            box.innerHTML = `<div class="verify-result ${res.ok ? 'ok' : 'fail'}">${res.ok ? '✓ Integrity confirmed: ' + (res.chunks || []).filter(c => c.ok).length + '/' + (res.chunks || []).length + ' parts + whole-file hash match' : '✗ Verification failed: ' + esc(res.error || 'hash mismatch')}</div>`;
             logLine('verify ' + (res.ok ? 'ok' : 'FAIL') + ': ' + f.name, res.ok ? 'ok' : 'err');
         } else box.innerHTML = `<div class="verify-result fail">${esc(r.error || 'verify failed')}</div>`;
     };
@@ -949,7 +949,7 @@ async function loadSharesInto(id) {
     if (!shares.length) { box.innerHTML = '<div class="pm-empty">No active links.</div>'; return; }
     for (const sh of shares) {
         const div = document.createElement('div'); div.className = 'share-row';
-        div.innerHTML = `<span>${sh.downloads || 0} dl</span><span class="share-exp">${esc(sh.expires_at ? new Date(sh.expires_at * 1000).toLocaleDateString() : '—')}</span>${S.canWrite ? '<button class="share-rev" title="Revoke">&times;</button>' : ''}`;
+        div.innerHTML = `<span>${sh.downloads || 0} dl</span><span class="share-exp">${esc(sh.expires_at ? new Date(sh.expires_at * 1000).toLocaleDateString() : 'never')}</span>${S.canWrite ? '<button class="share-rev" title="Revoke">&times;</button>' : ''}`;
         const rev = div.querySelector('.share-rev');
         if (rev) rev.onclick = async () => { await api('/api/shares/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: sh.id }) }); loadSharesInto(id); };
         box.appendChild(div);
@@ -1038,7 +1038,7 @@ function showInput(title, value, isSelect) {
         const field = $('mi-field'), sel = $('mi-select');
         const useSel = !!isSelect;
         field.classList.toggle('hidden', useSel); sel.classList.toggle('hidden', !useSel);
-        if (useSel) { sel.innerHTML = ''; const o = document.createElement('option'); o.value = ''; o.textContent = '— Cloud Drive (root) —'; sel.appendChild(o);
+        if (useSel) { sel.innerHTML = ''; const o = document.createElement('option'); o.value = ''; o.textContent = 'Cloud Drive (root)'; sel.appendChild(o);
             for (const f of value) { const oo = document.createElement('option'); oo.value = f.id; oo.textContent = '　'.repeat(f.depth || 0) + '📁 ' + f.name; sel.appendChild(oo); } }
         else { field.value = value || ''; field.type = (title.toLowerCase().includes('password')) ? 'password' : 'text'; }
         ov.classList.remove('hidden'); (useSel ? sel : field).focus();
@@ -1086,7 +1086,7 @@ async function createTextFile() {
     const content = await showInput('Content of ' + name, '');
     if (content === null) return;
     const r = await api('/api/files/create_text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, content, parent_id: S.parentID }) });
-    if (r.ok) { toast('File created — uploading…', 'success'); } else toast(r.error, 'error');
+    if (r.ok) { toast('File created, uploading…', 'success'); } else toast(r.error, 'error');
 }
 // An upload has two legs and the browser only sees the first one: the multipart
 // body travels to the server, and only THEN does the server start encrypting and
@@ -1145,7 +1145,7 @@ async function uploadOne(file, parentId) {
         xhr.send(fd);
     });
 
-    if (res.status === 401) { setSession(''); showLock('Session expired — unlock again.'); }
+    if (res.status === 401) { setSession(''); showLock('Session expired. Unlock again.'); }
     if (!res.ok || !res.data.job_id) {
         entry.status = 'FAILED';
         entry.error = res.error || 'upload rejected';
@@ -1268,7 +1268,7 @@ async function uploadDataTransfer(dt) {
     };
     if (entries.length) { for (const e of entries) await walkEntry(e, ''); }
     else if (dt.files) for (const f of dt.files) files.push({ file: f, rel: '' });
-    if (!files.length) { toast('Nothing to upload — the drop contained no files', 'error'); return; }
+    if (!files.length) { toast('Nothing to upload. The drop contained no files', 'error'); return; }
     // announce BEFORE the loop: the old toast fired after every file had finished,
     // i.e. exactly when the user no longer needed telling
     toast('Uploading ' + files.length + ' file' + (files.length === 1 ? '' : 's') + '…', 'info');
@@ -1398,7 +1398,7 @@ document.addEventListener('click', async e => {
         if (!token) return toast('Bot token required', 'error');
         toast('Registering bot…', 'info');
         const r = await api('/api/bots/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, guild_id: guild || undefined }) });
-        if (r.ok) { toast('Bot registered — storage channels will be provisioned on first upload', 'success'); $('bot-token-input').value = ''; $('guild-id-input').value = ''; loadBots(); loadStatus(); }
+        if (r.ok) { toast('Bot registered. Storage channels will be provisioned on first upload', 'success'); $('bot-token-input').value = ''; $('guild-id-input').value = ''; loadBots(); loadStatus(); }
         else toast(r.error, 'error');
     }
     if (e.target.id === 'btn-banner-bots') switchView('bots');
@@ -1423,16 +1423,16 @@ function populateTargets() {
 async function setPassword() {
     const pwd = $('cfg-new-password').value;
     if (pwd.length < 8) return toast('Password must be at least 8 characters', 'error');
-    if (!await confirmBox('Change master password?', 'This re-derives the encryption key. Files uploaded with the old password become unreadable — this is a fresh start, not a rotation.', true)) return;
+    if (!await confirmBox('Change master password?', 'This re-derives the encryption key. Files uploaded with the old password become unreadable. This is a fresh start, not a rotation.', true)) return;
     const r = await api('/api/auth/set_password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pwd }) });
-    if (r.ok && r.data.session) { setSession(r.data.session); $('cfg-new-password').value = ''; toast('Password updated — new key derived', 'success'); }
+    if (r.ok && r.data.session) { setSession(r.data.session); $('cfg-new-password').value = ''; toast('Password updated, new key derived', 'success'); }
     else toast(r.error || 'Failed', 'error');
 }
 async function rotateToken(scope) {
     const r = await api('/api/create-token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope }) });
     if (!r.ok) return toast(r.error, 'error');
     const out = $('token-output'); out.textContent = r.data.token; out.dataset.full = r.data.token; out.classList.remove('hidden');
-    try { await navigator.clipboard.writeText(r.data.token); toast(scope + ' token rotated & copied — update your scripts', 'success'); }
+    try { await navigator.clipboard.writeText(r.data.token); toast(scope + ' token rotated & copied. Update your scripts', 'success'); }
     catch (e) { toast('New ' + scope + ' token shown in Settings; click it to copy', 'info'); }
     logLine('rotated ' + scope + ' api token');
 }
@@ -1441,7 +1441,7 @@ document.addEventListener('click', async e => {
     if (e.target.id === 'btn-rotate-write') rotateToken('write');
     if (e.target.id === 'btn-rotate-read') rotateToken('read');
     if (e.target.id === 'token-output') { try { await navigator.clipboard.writeText(e.target.dataset.full); toast('Copied', 'success'); } catch (err) {} }
-    if (e.target.id === 'btn-lock-now') { await api('/api/auth/lock', { method: 'POST' }); setSession(''); showLock('Locked — unlock to continue.'); }
+    if (e.target.id === 'btn-lock-now') { await api('/api/auth/lock', { method: 'POST' }); setSession(''); showLock('Locked. Unlock to continue.'); }
     if (e.target.id === 'btn-catalog-sync') { const r = await api('/api/catalog/sync', { method: 'POST' }); toast(r.ok ? 'Catalog checkpointed' : 'Failed: ' + r.error, r.ok ? 'success' : 'error'); }
     if (e.target.id === 'btn-catalog-restore') { if (await confirmBox('Restore catalog?', 'Rebuilds the file listing from the last checkpoint.')) { const r = await api('/api/catalog/restore', { method: 'POST' }); toast(r.ok ? 'Catalog restored: ' + (r.data.files_imported || 0) + ' files' : 'Failed: ' + r.error, r.ok ? 'success' : 'error'); reloadCurrent(); } }
 });
@@ -1557,7 +1557,7 @@ async function boot() {
     if (S.canWrite) { loadBots(); }
     reconcileJobs();
     setInterval(loadStatus, 60000);
-    logLine('drive unlocked — engine ready', 'ok');
+    logLine('drive unlocked, engine ready', 'ok');
 }
 (async function init() {
     wireUI();               // binds unlock/new-menu/etc once
