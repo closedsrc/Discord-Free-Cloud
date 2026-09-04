@@ -26,6 +26,7 @@ type FileView struct {
 	ChunkCount      int         `json:"chunk_count"`      // distinct parts the file is split into
 	ReplicaServers  int         `json:"replica_servers"`  // servers holding at least one part
 	Health          string      `json:"health"`           // ok | partial | empty
+	Uploading       bool        `json:"uploading"`        // an ACTIVE job is still splitting/encrypting/publishing this file
 	Parts           []ChunkPart `json:"parts,omitempty"`  // per-part breakdown (details only)
 }
 
@@ -121,6 +122,18 @@ func (s *Server) decorate(files []db.FileRecord) []FileView {
 	if err != nil {
 		health = nil
 	}
+	// Files with an ACTIVE upload job are still being split, encrypted and
+	// published in the background. The catalog row exists from the moment the
+	// browser's send leg finished, so the listing can show it right away with
+	// an honest "Encrypting" state instead of waiting for the job to complete.
+	uploading := map[string]bool{}
+	if jobs, jerr := s.db.GetActiveJobs(); jerr == nil {
+		for _, j := range jobs {
+			if j.Type == "UPLOAD" {
+				uploading[j.FileID] = true
+			}
+		}
+	}
 	out := make([]FileView, 0, len(files))
 	for _, f := range files {
 		v := FileView{FileRecord: f}
@@ -130,6 +143,7 @@ func (s *Server) decorate(files []db.FileRecord) []FileView {
 			} else {
 				v.AttachmentCount, v.ChunkCount, v.ReplicaServers, v.Health = s.fileHealth(f.ID)
 			}
+			v.Uploading = uploading[f.ID]
 		}
 		out = append(out, v)
 	}

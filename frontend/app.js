@@ -512,6 +512,10 @@ function thumbHTML(f) {
 }
 function statusOf(f) {
     if (f.is_dir) return 'folder';
+    // The row exists from the moment the browser finished sending; the server
+    // splits, encrypts and publishes in the background. Say so honestly instead
+    // of showing a scary INCOMPLETE for a file that is merely still working.
+    if (f.uploading) return 'processing';
     if (f.health === 'empty') return 'error';
     if (f.health === 'partial') return 'processing';
     return 'ok';
@@ -528,7 +532,7 @@ function renderGrid(files) {
             ${thumbHTML(f)}
             <span class="fc-check${S.selected.has(f.id) ? ' on' : ''}">✓</span>
             <button class="fc-menu" aria-label="More">⋮</button>
-            ${st !== 'ok' && st !== 'folder' ? `<span class="fc-badge badge-${st === 'processing' ? 'processing' : 'error'}">${st === 'processing' ? 'PARTIAL' : 'INCOMPLETE'}</span>` : ''}
+            ${st !== 'ok' && st !== 'folder' ? `<span class="fc-badge badge-${st === 'processing' ? 'processing' : 'error'}">${st === 'processing' ? (f.uploading ? 'ENCRYPTING' : 'PARTIAL') : 'INCOMPLETE'}</span>` : ''}
             <div class="fc-pill">
                 <span class="fc-name" title="${esc(f.name)}">${esc(f.name)}${f.favorite ? ' <span class="fav-star">♥</span>' : ''}</span>
                 <span class="fc-meta">${f.is_dir ? 'Folder' : fmtBytes(f.size) + ' · ' + fmtDateShort(f.mod_time)}</span>
@@ -557,7 +561,7 @@ function renderTable(files) {
             <td class="tc"><input type="checkbox" class="checkbox row-check" ${S.selected.has(f.id) ? 'checked' : ''}></td>
             <td><div class="fr-name"><span class="fr-icon k-${kindOf(f)}">${thumb}</span>
                 <span class="fr-label">${esc(f.name)}${f.favorite ? ' <span class="fav-star">♥</span>' : ''}</span></div></td>
-            <td class="fr-status">${st === 'processing' ? '<span class="st processing">Partial</span>' : st === 'error' ? '<span class="st error">Incomplete</span>' : ''}</td>
+            <td class="fr-status">${st === 'processing' ? `<span class="st processing">${f.uploading ? 'Encrypting' : 'Partial'}</span>` : st === 'error' ? '<span class="st error">Incomplete</span>' : ''}</td>
             <td class="fr-size">${f.is_dir ? '' : fmtBytes(f.size)}</td>
             <td class="fr-date">${fmtDate(f.mod_time)}</td>
             <td><button class="fr-menu" aria-label="More">⋮</button></td>`;
@@ -1155,6 +1159,11 @@ async function uploadOne(file, parentId) {
     }));
     transfersDirty = true; saveTransfers(); renderTransfers();
     watchJob(res.data.job_id);
+    // The server created the catalog row before it answered, so the file is
+    // already in the listing — pull it in now. The row shows "Encrypting" while
+    // the background job splits, encrypts and publishes; the user is done, the
+    // drive is not.
+    reloadCurrent();
     return res.data.job_id;
 }
 
