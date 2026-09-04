@@ -501,7 +501,10 @@ function revealOnLoad(img) {
 // outside them keeps the type icon.
 const THUMB_EXT = new Set(['jpg','jpeg','png','gif']);
 const THUMB_MAX_BYTES = 12 * 1024 * 1024;
-const thumbable = f => THUMB_EXT.has(extOf(f.name)) && (f.size || 0) <= THUMB_MAX_BYTES;
+// !f.uploading: while the background job is still publishing parts, the file
+// cannot be read back yet, and asking /api/thumb for it returns 502. The row
+// shows the type icon until the job completes and the listing refreshes.
+const thumbable = f => !f.uploading && THUMB_EXT.has(extOf(f.name)) && (f.size || 0) <= THUMB_MAX_BYTES;
 const thumbURL = f => withSession('/api/thumb?file_id=' + encodeURIComponent(f.id));
 function thumbHTML(f) {
     // The type icon always renders underneath; the thumbnail fades in over it
