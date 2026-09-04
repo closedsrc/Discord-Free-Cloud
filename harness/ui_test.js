@@ -107,12 +107,17 @@ globalThis.IntersectionObserver = class { observe() {} unobserve() {} disconnect
 globalThis.WebSocket = class { constructor(){ this.readyState = 0; setTimeout(()=>{ this.onopen && this.onopen(); }, 0); } send(){} close(){} };
 WebSocket.OPEN = 1;
 
-// fetch stub: controllable queue of responses
+// fetch stub. Entries may carry a `url` substring so a queued answer is bound to
+// the call it was written for; without that, a background poll (watchJob hitting
+// /api/jobs) steals the response the test queued for a listing.
 const fetchLog = [];
 let fetchQueue = [];
+const DEFAULT_BODY = url => (/\/api\/jobs/.test(url) ? [] : /\/api\/files\/view|\/api\/files\b/.test(url) ? [] : { ok: true });
 async function fakeFetch(url, opts) {
   fetchLog.push({ url, opts: opts || {} });
-  let payload = fetchQueue.length ? fetchQueue.shift() : { ok: true };
+  let idx = fetchQueue.findIndex(q => q.url && url.includes(q.url));
+  if (idx < 0) idx = fetchQueue.findIndex(q => !q.url && !/\/api\/jobs/.test(url));
+  const payload = idx >= 0 ? fetchQueue.splice(idx, 1)[0] : { ok: true, body: DEFAULT_BODY(url) };
   const body = JSON.stringify(payload.body !== undefined ? payload.body : payload);
   return {
     ok: payload.ok !== false,
@@ -124,6 +129,24 @@ async function fakeFetch(url, opts) {
 }
 globalThis.fetch = fakeFetch;
 
+// FormData + XMLHttpRequest stubs. uploadOne uses XHR (not fetch) because it is
+// the only way to observe upload progress, so the harness has to drive the
+// progress/onload callbacks by hand. `xhrControl.pending` holds the live request
+// so a test can emit progress mid-flight and assert what the UI showed.
+globalThis.FormData = class { constructor(){ this.parts = []; } append(k, v){ this.parts.push([k, v]); } };
+globalThis.File = class { constructor(bits, name, opts){ this.name = name; this.size = (opts && opts.size) || 1024; this.type = (opts && opts.type) || ''; } };
+const xhrControl = { pending: null, log: [] };
+globalThis.XMLHttpRequest = class {
+  constructor() { this.upload = {}; this.status = 0; this.responseText = ''; this._headers = {}; }
+  open(method, url) { this.method = method; this.url = url; }
+  setRequestHeader(k, v) { this._headers[k] = v; }
+  send(body) { this.body = body; xhrControl.pending = this; xhrControl.log.push(this.method + ' ' + this.url); }
+  // helpers the test calls
+  emitProgress(loaded, total) { this.upload.onprogress && this.upload.onprogress({ lengthComputable: true, loaded, total }); }
+  finish(status, obj) { this.status = status; this.responseText = JSON.stringify(obj); this.onload && this.onload(); }
+  fail() { this.onerror && this.onerror(); }
+};
+
 // ---------- load app.js ----------
 const fs = require('fs');
 const vm = require('vm');
@@ -134,6 +157,7 @@ const ctx = {
   fetch: fakeFetch, WebSocket: globalThis.WebSocket, IntersectionObserver: globalThis.IntersectionObserver,
   addEventListener: () => {}, console, setTimeout, clearTimeout, setInterval, clearInterval,
   URLSearchParams, Date, Math, JSON, CSS: { escape: s => String(s) }, navigator_: globalThis.navigator,
+  FormData: globalThis.FormData, XMLHttpRequest: globalThis.XMLHttpRequest, File: globalThis.File,
   // app.js references a few browser globals directly; wire them:
   getComputedStyle: () => ({}),
 };
@@ -160,6 +184,10 @@ __exports.applyPermissions = applyPermissions;
 __exports.checkAuth = checkAuth;
 __exports.unlock = unlock;
 __exports.showLock = showLock;
+__exports.uploadOne = uploadOne;
+__exports.uploadFiles = uploadFiles;
+__exports.allTransfers = allTransfers;
+__exports.applyTelemetry = applyTelemetry;
 __exports.kindOf = kindOf;
 __exports.SHEET = SHEET;
 __exports.ICON = ICON;
@@ -268,6 +296,74 @@ async function run() {
   check('read-only badge hidden after unlock', $('read-only-badge').classList.contains('hidden'), $('read-only-badge').className);
   check('sign-in button hidden after unlock', $('btn-sign-in').classList.contains('hidden'), $('btn-sign-in').className);
   check('lock overlay hidden after unlock', $('lock-overlay').classList.contains('hidden'), $('lock-overlay').className);
+
+  console.log('\n== upload feedback is immediate (regression: silence for the whole send leg) ==');
+  // The reported bug: pick a file, nothing happens. The transfer used to be
+  // registered only AFTER the multipart body finished uploading, so a large file
+  // meant minutes with no toast, no badge, no card and no row.
+  S.canWrite = true; S.view = 'drive'; S.parentID = '';
+  app.allTransfers.clear();
+  $('toast-stack').children = [];
+  xhrControl.pending = null;
+  const file = new File(['x'], 'holiday.zip', { size: 40 * 1024 * 1024 });
+  const upload = app.uploadFiles([file]);       // deliberately not awaited yet
+  await new Promise(r => setTimeout(r, 5));
+  check('a transfer exists before the request completes', app.allTransfers.size === 1, 'size=' + app.allTransfers.size);
+  check('transfer badge is visible immediately', !$('nav-transfer-badge').classList.contains('hidden'), $('nav-transfer-badge').className);
+  check('badge counts the in-flight upload', $('nav-transfer-badge').textContent === '1', $('nav-transfer-badge').textContent);
+  check('drawer opened so the card is on screen', !$('transfers-drawer').classList.contains('closed'), $('transfers-drawer').className);
+  check('a toast announced the upload', $('toast-stack').children.length > 0, 'toasts=' + $('toast-stack').children.length);
+  check('the card is drawn (not the empty state)', !/No transfers yet/.test($('transfers-drawer-body').innerHTML), $('transfers-drawer-body').innerHTML.slice(0, 60));
+  check('the card names the send leg', /Sending/.test($('transfers-drawer-body').innerHTML), $('transfers-drawer-body').innerHTML.slice(0, 200));
+  check('XHR was used for the upload', xhrControl.log.some(l => l.includes('/api/upload/file')), JSON.stringify(xhrControl.log));
+
+  // mid-flight progress must move the bar
+  const firstEntry = () => [...app.allTransfers.values()][0];
+  xhrControl.pending.emitProgress(10 * 1024 * 1024, 40 * 1024 * 1024);
+  check('upload progress updates the transfer', Math.round(firstEntry().progress) === 25, 'progress=' + firstEntry().progress);
+  check('upload progress reports bytes sent', firstEntry().processed_bytes === 10 * 1024 * 1024, 'bytes=' + firstEntry().processed_bytes);
+
+  // server accepts -> the card must move to the job id, not duplicate
+  fetchQueue.push({ ok: true, body: [] });      // watchJob's first /api/jobs poll
+  xhrControl.pending.finish(200, { ok: true, job_id: 'JOB-1', file_name: 'holiday.zip', status: 'started' });
+  await upload;
+  check('still exactly one transfer after the response', app.allTransfers.size === 1, 'size=' + app.allTransfers.size);
+  check('the transfer is keyed by the server job id', app.allTransfers.has('JOB-1'), JSON.stringify([...app.allTransfers.keys()]));
+  check('the card switches to the storing leg', app.allTransfers.get('JOB-1').stage === 'storing', app.allTransfers.get('JOB-1').stage);
+  // and server telemetry keeps updating that same card
+  app.applyTelemetry({ job_id: 'JOB-1', file_name: 'holiday.zip', type: 'UPLOAD', progress_percent: 60, status: 'ACTIVE', total_chunks: 6, completed_chunks: 3 });
+  check('telemetry updates the same card', app.allTransfers.size === 1 && app.allTransfers.get('JOB-1').progress === 60, JSON.stringify([...app.allTransfers.keys()]));
+  check('telemetry does not relabel it as Sending', /Encrypting/.test($('transfers-drawer-body').innerHTML), $('transfers-drawer-body').innerHTML.slice(0, 200));
+
+  console.log('\n== a rejected upload reports the reason instead of failing silently ==');
+  app.allTransfers.clear();
+  $('toast-stack').children = [];
+  const bad = app.uploadOne(new File(['x'], 'nope.bin', { size: 10 }), '');
+  await new Promise(r => setTimeout(r, 5));
+  xhrControl.pending.finish(507, { ok: false, error: 'no storage server connected' });
+  await bad;
+  const failedXfer = [...app.allTransfers.values()][0];
+  check('the failed upload is marked FAILED', failedXfer && failedXfer.status === 'FAILED', JSON.stringify(failedXfer && failedXfer.status));
+  check('the failure carries the server reason', failedXfer && /no storage server/.test(failedXfer.error), JSON.stringify(failedXfer && failedXfer.error));
+  check('the user is toasted about the failure', $('toast-stack').children.length > 0, 'toasts=' + $('toast-stack').children.length);
+
+  console.log('\n== a background refresh must not blank the listing (skeleton flicker) ==');
+  // Navigating somewhere new should show skeletons; a refresh of the SAME listing
+  // (telemetry, files_changed, an upload finishing) must keep the rows on screen.
+  S.layout = 'list'; S.view = 'drive'; S.parentID = ''; $('search-input').value = '';
+  fetchQueue.push({ url: '/api/files/view', ok: true, body: [{ id: 'r1', name: 'kept.png', is_dir: false, size: 4, mod_time: 4, health: 'ok' }] });
+  await reload();
+  check('rows present after the first load', S.files.length === 1, 'files=' + S.files.length);
+  fetchQueue.push({ url: '/api/files/view', ok: true, body: [{ id: 'r1', name: 'kept.png', is_dir: false, size: 4, mod_time: 4, health: 'ok' }] });
+  const refresh = reload();                       // same folder -> quiet refresh
+  check('refresh keeps the existing rows visible', !$('file-tbody').innerHTML.includes('skeleton-row'), $('file-tbody').innerHTML.slice(0, 60));
+  await refresh;
+  S.parentID = 'folder-9';                        // now actually navigate
+  fetchQueue.push({ ok: true, body: [] });
+  const nav = reload();
+  check('navigation does show skeletons', $('file-tbody').innerHTML.includes('skeleton-row'), $('file-tbody').innerHTML.slice(0, 60));
+  await nav;
+  S.parentID = '';
 
   console.log('\n----------------------------------------');
   console.log(`RESULT: ${passed} passed, ${failed} failed`);

@@ -118,6 +118,9 @@ function applyTelemetry(ev) {
         status: ev.status || prev.status || 'ACTIVE',
         error: ev.error || '',
         at: Date.now(),
+        // telemetry means the server owns this transfer now: the browser's send
+        // leg is finished, so the card stops saying "Sending"
+        stage: prev.type === 'DOWNLOAD' || ev.type === 'DOWNLOAD' ? undefined : 'storing',
     };
     if (next.status === 'COMPLETED') next.progress = 100;
     allTransfers.set(ev.job_id, next);
@@ -336,6 +339,7 @@ function renderBreadcrumb() {
 }
 
 let loadSeq = 0;
+let loadedKey = null;   // which listing the rows on screen belong to
 async function reloadCurrent() {
     // Navigations must not be dropped while an earlier list request is still in
     // flight — on a slow host that left the old contents under the new title.
@@ -348,11 +352,19 @@ async function reloadCurrent() {
     const q = $('search-input').value.trim();
     if (q) { params.set('search', q); params.delete('parent_id'); params.delete('view'); }
     S.searchMode = !!q;
+    // A navigation and a background refresh want opposite things. Going somewhere
+    // new should show skeletons, because the old folder's rows under a new title
+    // are a lie. A refresh (telemetry, files_changed, an upload finishing) must
+    // NOT blank the listing the user is reading — that flicker is worse than a
+    // slightly stale row. The request key tells the two apart.
+    const key = params.toString();
+    if (key !== loadedKey) S.files = [];
     S.loading = true;
     render();
-    const r = await api('/api/files/view' + (params.toString() ? '?' + params : ''));
+    const r = await api('/api/files/view' + (key ? '?' + key : ''));
     if (seq !== loadSeq) return;
     S.files = Array.isArray(r.data) ? r.data : [];
+    loadedKey = key;
     S.loading = false;
     render();
 }
@@ -441,7 +453,10 @@ function renderSkeletons() {
 function render() {
     const files = visibleFiles();
     $('count-label').textContent = S.loading ? 'Loading…' : files.length + (files.length === 1 ? ' item' : ' items');
-    const isLoading = S.loading && (S.view === 'drive' || S.view === 'recents' || S.view === 'favorites');
+    // Skeletons only stand in for content we do not have. A refresh of a listing
+    // already on screen keeps its rows (reloadCurrent clears S.files on a real
+    // navigation), otherwise every telemetry tick blanks the folder mid-read.
+    const isLoading = S.loading && files.length === 0 && (S.view === 'drive' || S.view === 'recents' || S.view === 'favorites');
     $('empty-state').classList.toggle('hidden', isLoading || files.length !== 0);
     if (!isLoading && files.length === 0) {
         const searching = $('search-input').value.trim();
@@ -1052,18 +1067,114 @@ async function createTextFile() {
     const r = await api('/api/files/create_text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, content, parent_id: S.parentID }) });
     if (r.ok) { toast('File created — uploading…', 'success'); } else toast(r.error, 'error');
 }
+// An upload has two legs and the browser only sees the first one: the multipart
+// body travels to the server, and only THEN does the server start encrypting and
+// posting shards to Discord (which is what /ws telemetry reports). The old code
+// awaited fetch() before registering the transfer, so for the whole send leg —
+// minutes on a large file — there was no toast, no badge, no card and no row:
+// indistinguishable from "upload is broken". XHR is used instead of fetch purely
+// because it is the only way to observe upload progress in a browser.
+const XFER_STAGE = { sending: 'Sending', queued: 'Processing', storing: 'Encrypting' };
 async function uploadOne(file, parentId) {
+    const localID = 'send-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+    const parts = Math.max(1, Math.ceil(file.size / 7.5e6));
+    const entry = {
+        name: file.name, type: 'UPLOAD', file_id: '', total_bytes: file.size,
+        processed_bytes: 0, chunks_done: 0, chunks_total: parts, speed: 0, eta: 0,
+        progress: 0, status: 'ACTIVE', error: '', at: Date.now(), stage: 'sending',
+    };
+    allTransfers.set(localID, entry);
+    transfersDirty = true; renderTransfers();
+
     const fd = new FormData();
     fd.append('file', file); fd.append('parent_id', parentId || S.parentID);
     const tgt = $('upload-target-select').value;
     if (tgt && tgt !== 'all') fd.append('target_guild_id', tgt);
-    const r = await api('/api/upload/file', { method: 'POST', body: fd });
-    if (r.ok && r.data.job_id) {
-        allTransfers.set(r.data.job_id, { name: file.name, type: 'UPLOAD', file_id: '', total_bytes: file.size, processed_bytes: 0, chunks_done: 0, chunks_total: Math.ceil(file.size / 7.5e6) || 1, speed: 0, eta: 0, progress: 2, status: 'ACTIVE', error: '', at: Date.now() });
-        saveTransfers(); renderTransfers();
-    } else toast('Upload failed: ' + r.error, 'error');
+
+    const res = await new Promise(resolve => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/upload/file');
+        const s = session();
+        if (s) xhr.setRequestHeader('X-DFC-Session', s);
+        const startedAt = Date.now();
+        xhr.upload.onprogress = ev => {
+            if (!ev.lengthComputable) return;
+            const secs = Math.max(0.25, (Date.now() - startedAt) / 1000);
+            const rate = ev.loaded / secs;
+            entry.processed_bytes = ev.loaded;
+            entry.progress = ev.total ? (ev.loaded / ev.total) * 100 : 0;
+            entry.speed = rate / 1e6;
+            entry.eta = rate > 0 ? Math.max(0, (ev.total - ev.loaded) / rate) : 0;
+            // The body is sent but the server has not answered yet (it stages the
+            // file and starts the job first). Saying "Sending · 0s left" there
+            // looks stuck; name the wait instead.
+            if (ev.total && ev.loaded >= ev.total) { entry.stage = 'queued'; entry.speed = 0; entry.eta = 0; }
+            renderTransfers();
+        };
+        xhr.onload = () => {
+            let data = {};
+            try { data = JSON.parse(xhr.responseText || '{}'); } catch (e) { data = {}; }
+            resolve({ ok: xhr.status >= 200 && xhr.status < 300 && data.ok !== false, status: xhr.status, data, error: data.error || ('HTTP ' + xhr.status) });
+        };
+        xhr.onerror = () => resolve({ ok: false, status: 0, data: {}, error: 'network error' });
+        xhr.onabort = () => resolve({ ok: false, status: 0, data: {}, error: 'cancelled' });
+        xhr.send(fd);
+    });
+
+    if (res.status === 401) { setSession(''); showLock('Session expired — unlock again.'); }
+    if (!res.ok || !res.data.job_id) {
+        entry.status = 'FAILED';
+        entry.error = res.error || 'upload rejected';
+        transfersDirty = true; saveTransfers(); renderTransfers();
+        toast('Upload failed: ' + entry.error, 'error');
+        logLine('upload FAILED ' + file.name + ': ' + entry.error, 'err');
+        return null;
+    }
+    // Hand the card over to the job id so /ws telemetry keeps updating the same
+    // entry instead of opening a second one next to it.
+    allTransfers.delete(localID);
+    allTransfers.set(res.data.job_id, Object.assign({}, entry, {
+        stage: 'storing', progress: 0, processed_bytes: 0, speed: 0, eta: 0,
+    }));
+    transfersDirty = true; saveTransfers(); renderTransfers();
+    watchJob(res.data.job_id);
+    return res.data.job_id;
 }
-async function uploadFiles(files) { if (!files.length || !requireWrite()) return; await ensureParentForUpload(); for (const f of files) await uploadOne(f, S.parentID); }
+
+// Safety net for the listing. A completed upload is normally revealed by the
+// telemetry COMPLETED event or files_changed, but a throttled tab or a WebSocket
+// reconnect can drop both, and then the file exists on Discord while the drive
+// still shows the old contents. Poll until the job leaves the active list, then
+// refresh once regardless of what the socket did or did not deliver.
+const watchedJobs = new Set();
+function watchJob(jobID) {
+    if (!jobID || watchedJobs.has(jobID)) return;
+    watchedJobs.add(jobID);
+    let ticks = 0;
+    const tick = async () => {
+        ticks++;
+        const r = await api('/api/jobs');
+        const rows = Array.isArray(r.data) ? r.data : [];
+        const live = rows.find(j => j.id === jobID);
+        if (live && live.status === 'ACTIVE' && ticks < 400) { setTimeout(tick, 3000); return; }
+        watchedJobs.delete(jobID);
+        const t = allTransfers.get(jobID);
+        if (t && t.status !== 'FAILED') {
+            if (live && live.status === 'FAILED') { t.status = 'FAILED'; t.error = live.error || 'upload failed'; }
+            else { t.status = 'COMPLETED'; t.progress = 100; t.processed_bytes = t.total_bytes; }
+            saveTransfers(); renderTransfers();
+        }
+        reloadCurrent(); loadStatus();
+    };
+    setTimeout(tick, 3000);
+}
+async function uploadFiles(files) {
+    if (!files.length || !requireWrite()) return;
+    await ensureParentForUpload();
+    toast(files.length === 1 ? 'Uploading ' + files[0].name + '…' : 'Uploading ' + files.length + ' files…', 'info');
+    toggleDrawer(true);
+    for (const f of files) await uploadOne(f, S.parentID);
+}
 async function uploadDirectory(fileList) {
     await ensureParentForUpload();
     const files = [...fileList];
@@ -1083,6 +1194,7 @@ async function uploadDirectory(fileList) {
     };
     const top = [...roots][0] || 'upload';
     toast('Uploading folder "' + top + '" (' + files.length + ' files)…', 'info');
+    toggleDrawer(true);
     for (const f of files) {
         const rel = (f.webkitRelativePath || f.name).split('/').slice(0, -1).join('/');
         await uploadOne(f, await folderFor(rel));
@@ -1105,6 +1217,11 @@ async function uploadDataTransfer(dt) {
     };
     if (entries.length) { for (const e of entries) await walkEntry(e, ''); }
     else if (dt.files) for (const f of dt.files) files.push({ file: f, rel: '' });
+    if (!files.length) { toast('Nothing to upload — the drop contained no files', 'error'); return; }
+    // announce BEFORE the loop: the old toast fired after every file had finished,
+    // i.e. exactly when the user no longer needed telling
+    toast('Uploading ' + files.length + ' file' + (files.length === 1 ? '' : 's') + '…', 'info');
+    toggleDrawer(true);
     const folderCache = new Map([['', target]]);
     const folderFor = async rel => {
         if (!rel) return target;
@@ -1119,7 +1236,6 @@ async function uploadDataTransfer(dt) {
         return id;
     };
     for (const { file, rel } of files) await uploadOne(file, await folderFor(rel));
-    toast('Uploading ' + files.length + ' file' + (files.length === 1 ? '' : 's') + '…', 'info');
 }
 document.addEventListener('change', e => {
     if (e.target.id === 'file-input') { uploadFiles([...e.target.files]); e.target.value = ''; }
@@ -1140,12 +1256,25 @@ document.addEventListener('drop', e => {
 // ---------- transfers rendering ----------
 function xferCard(t, id) {
     const st = t.status === 'COMPLETED' ? 'done' : t.status === 'FAILED' ? 'failed' : t.status === 'PAUSED' ? 'paused' : 'active';
-    const label = { done: 'Done', failed: 'Failed', paused: 'Paused', active: (t.type === 'DOWNLOAD' ? 'Downloading' : t.type === 'DELETE' ? 'Cleaning' : 'Uploading') }[st];
+    // An upload is two legs with two separate progress sources, so name the leg
+    // instead of pretending one bar: "Sending" is the browser→server body (XHR
+    // progress), "Encrypting" is the server→Discord shard publish (/ws telemetry).
+    const active = t.type === 'DOWNLOAD' ? 'Downloading' : t.type === 'DELETE' ? 'Cleaning'
+        : (t.stage && XFER_STAGE[t.stage]) || 'Uploading';
+    const label = { done: 'Done', failed: 'Failed', paused: 'Paused', active }[st];
     const icon = t.type === 'DOWNLOAD' ? ACT.download : t.type === 'DELETE' ? ACT.trash : ACT.upload;
+    const meta = st === 'active' && t.speed > 0 ? ' · ' + t.speed.toFixed(1) + ' MB/s · ' + Math.round(t.eta || 0) + 's left' : '';
+    // On the storing leg the server counts the bytes it has to publish, which
+    // includes every replica — a 20 MB file reports a 40 MB total across two
+    // guilds. Rendering that as "4 MB / 40 MB" reads as if the file doubled, so
+    // the shard counter is the honest unit there; bytes belong to the send leg.
+    const sub = t.stage === 'storing' && t.chunks_total
+        ? `part ${Math.min(t.chunks_done || 0, t.chunks_total)} of ${t.chunks_total} encrypted & published`
+        : `${fmtBytes(t.processed_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)}`;
     return `<div class="xfer-card" data-id="${esc(id)}">
         <div class="xfer-top"><span class="xfer-ic">${icon}</span>
             <div style="min-width:0;flex:1"><div class="xfer-name">${esc(t.name)}</div>
-            <div class="xfer-sub">${fmtBytes(t.processed_bytes || 0)} / ${fmtBytes(t.total_bytes || 0)}${st === 'active' ? ' · ' + (t.speed > 0 ? t.speed.toFixed(1) + ' MB/s · ' + Math.round(t.eta || 0) + 's left' : '') : ''}${st === 'failed' ? ' · ' + esc(t.error || 'failed') : ''}</div></div>
+            <div class="xfer-sub">${sub}${meta}${st === 'failed' ? ' · ' + esc(t.error || 'failed') : ''}</div></div>
             <span class="xfer-state ${st}">${label}</span></div>
         <div class="xfer-bar ${st}"><div style="width:${Math.max(2, t.progress || 0)}%"></div></div>
         ${st === 'active' ? `<div class="xfer-actions"><button class="xfer-x danger" data-x="cancel">Cancel</button></div>` : ''}
@@ -1182,7 +1311,10 @@ document.addEventListener('click', async e => {
     if (e.target.closest('#btn-close-transfers')) toggleDrawer(false);
     if (e.target.closest('#btn-open-transfers')) toggleDrawer(true);
 });
-function toggleDrawer(open) { $('transfers-drawer').classList.toggle('closed', !open); }
+function toggleDrawer(open) {
+    $('transfers-drawer').classList.toggle('closed', !open);
+    document.body.classList.toggle('drawer-open', !!open);
+}
 
 // ---------- infrastructure ----------
 async function loadBots() {

@@ -690,7 +690,10 @@ body.read-only #view-settings .card:first-child{display:none}
     font-size:17px;font-weight:500;color:var(--text);
 }
 .drop-overlay span{padding:26px 40px;border:2px dashed var(--raise-2);border-radius:15px}
-.toast-stack{position:fixed;right:20px;bottom:20px;z-index:500;display:flex;flex-direction:column;gap:9px;max-width:380px}
+.toast-stack{position:fixed;right:20px;bottom:20px;z-index:500;display:flex;flex-direction:column;gap:9px;max-width:380px;transition:right .22s ease}
+/* the transfers drawer is 342px of the viewport's right edge; a toast parked
+   there covers its footer (speed/ETA/Cancel all) exactly when both are in use */
+body.drawer-open .toast-stack{right:362px}
 .toast{
     padding:11px 15px;border-radius:9px;background:var(--raise);border:1px solid var(--raise-2);
     font-size:13px;color:var(--text);box-shadow:0 12px 34px rgba(0,0,0,.55);

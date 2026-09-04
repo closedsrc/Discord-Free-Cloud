@@ -23,3 +23,6 @@ discord-free-cloud.exe
 # Live browser-capture helper embeds the sign-in password + the portwarp tunnel
 # host. It is an operator-side tool and must never be committed.
 harness/live_shot.js
+harness/upload_probe.js
+harness/feedback_probe.js
+harness/upload_accept.js
